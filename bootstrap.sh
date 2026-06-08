@@ -1069,6 +1069,7 @@ cat > app/static/index.html <<'FRONTENDHTML'
       state.hasMore = true;
       el("grid").classList.remove("hidden");
       el("healthPanel").classList.add("hidden");
+      document.querySelector(".controls").classList.remove("hidden");
       window.scrollTo(0, 0);
 
       const p = new URLSearchParams();
@@ -1212,6 +1213,7 @@ cat > app/static/index.html <<'FRONTENDHTML'
     async function showHealth() {
       state.mode = "health";
       el("grid").classList.add("hidden");
+      document.querySelector(".controls").classList.add("hidden");
       const panel = el("healthPanel");
       panel.classList.remove("hidden");
       panel.innerHTML = "Loading parameters…";
@@ -1321,6 +1323,7 @@ cat > app/static/index.html <<'FRONTENDHTML'
     function showManageFeeds() {
       state.mode = "manage";
       el("grid").classList.add("hidden");
+      document.querySelector(".controls").classList.add("hidden");
       const panel = el("healthPanel");
       panel.classList.remove("hidden");
 
