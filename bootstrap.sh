@@ -148,7 +148,7 @@ else
   echo "WARNING: tailscale cert fetch failed."
   echo "Run manually before starting the stack:"
   echo "  sudo tailscale cert --cert-file ${PROJECT_DIR}/caddy/certs/cert.pem \\"
-  echo "                      --key-file  ${PROJECT_DIR}/caddy/certs/key.pem \\"
+  echo "                       --key-file  ${PROJECT_DIR}/caddy/certs/key.pem \\"
   echo "                      ${TS_HOSTNAME}"
 fi
 
@@ -568,7 +568,7 @@ def refresh_one_feed(feed) -> int:
     parsed = feedparser.parse(feed["xml_url"])
     now    = utc_now()
     error  = None
-    count  = 1
+    count  = 0
 
     if parsed.bozo and getattr(parsed, "bozo_exception", None):
         error = str(parsed.bozo_exception)[:500]
@@ -634,7 +634,7 @@ def create_profile(p: ProfileCreate):
             cur = conn.execute("INSERT INTO profiles (name) VALUES (?)", (p.name,))
             return {"id": cur.lastrowid, "name": p.name}
     except sqlite3.IntegrityError:
-        raise HTTPException(400, "Profile variant designation name already occupied.")
+        raise HTTPException(400, "Profile name already occupied.")
 
 @app.get("/api/meta")
 def meta(profile_id: int = 1):
@@ -696,13 +696,6 @@ def delete_feed(feed_id: int):
         conn.execute("DELETE FROM feeds WHERE id = ?", (feed_id,))
     return {"status": "deleted"}
 
-@app.put("/api/items/{item_id}")
-def edit_entry(item_id: int, e: EntryEdit):
-    with db() as conn:
-        cur = conn.execute("UPDATE items SET title = ?, teaser = ? WHERE id = ?", (e.title, e.teaser, item_id))
-        if cur.rowcount == 0: raise HTTPException(404, "Item story reference target unavailable.")
-    return {"status": "updated"}
-
 @app.get("/api/health")
 def health(profile_id: int = 1):
     with db() as conn:
@@ -742,7 +735,8 @@ def items(
     if feed_id:         where.append("f.id = ?");                  params.append(feed_id)
     if q:
         where.append("(i.title LIKE ? OR i.teaser LIKE ? OR f.title LIKE ?)")
-        like = f"%{q}%"; params.extend([like, like, like])
+        like = f"%{q}%"
+        params.extend([like, like, like])
     if unread  is True: where.append("i.is_read = 0")
     if starred is True: where.append("i.is_starred = 1")
 
@@ -782,7 +776,7 @@ def update_item(item_id: int, state: ItemState):
     params.append(item_id)
     with db() as conn:
         cur = conn.execute(f"UPDATE items SET {', '.join(updates)} WHERE id = ?", params)
-        if cur.rowcount == 0: raise HTTPException(404, "Target story item not found.")
+        if cur.rowcount == 0: raise HTTPException(404, "Item not found.")
         row = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
         return dict(row)
 
@@ -808,16 +802,16 @@ def refresh():
     return {"status": "started", "refreshed_at": utc_now()}
 
 # -----------------------------------------------------------------
-# OPML Export Endpoint
+# OPML Export
 # -----------------------------------------------------------------
 @app.get("/api/profiles/{profile_id}/export", response_class=Response)
 def export_profile_opml(profile_id: int):
     with db() as conn:
         profile = conn.execute("SELECT name FROM profiles WHERE id = ?", (profile_id,)).fetchone()
         if not profile:
-            raise HTTPException(status_code=404, detail="Profile configuration not found.")
+            raise HTTPException(status_code=404, detail="Profile not found.")
         feeds_list = conn.execute(
-            "SELECT title, category, xml_url, html_url FROM feeds WHERE profile_id = ? ORDER BY category, title", 
+            "SELECT title, category, xml_url, html_url FROM feeds WHERE profile_id = ? ORDER BY category, title",
             (profile_id,)
         ).fetchall()
 
@@ -831,31 +825,21 @@ def export_profile_opml(profile_id: int):
         cat_name = f["category"] or "Uncategorised"
         if cat_name not in categories:
             categories[cat_name] = ET.SubElement(body, "outline", {"text": cat_name, "title": cat_name})
-        
         ET.SubElement(categories[cat_name], "outline", {
-            "text": f["title"],
-            "title": f["title"],
-            "type": "rss",
-            "version": "RSS",
-            "htmlUrl": f["html_url"] or "",
-            "xmlUrl": f["xml_url"]
+            "text": f["title"], "title": f["title"],
+            "type": "rss", "version": "RSS",
+            "htmlUrl": f["html_url"] or "", "xmlUrl": f["xml_url"]
         })
 
     tree = ET.ElementTree(opml)
     ET.indent(tree, space="  ")
     xml_data = ET.tostring(opml, encoding="utf-8", xml_declaration=True)
-
     filename = f"feeds_{profile['name'].lower().replace(' ', '_')}.opml"
-    return Response(
-        content=xml_data,
-        media_type="application/xml",
-        headers={
-            "Content-Disposition": f'attachment; filename="{filename}"'
-        }
-    )
+    return Response(content=xml_data, media_type="application/xml",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 # -----------------------------------------------------------------
-# OPML Import Endpoint
+# OPML Import
 # -----------------------------------------------------------------
 @app.post("/api/profiles/{profile_id}/import")
 async def import_profile_opml(profile_id: int, file: UploadFile = File(...)):
@@ -863,13 +847,12 @@ async def import_profile_opml(profile_id: int, file: UploadFile = File(...)):
         profile = conn.execute("SELECT id FROM profiles WHERE id = ?", (profile_id,)).fetchone()
         if not profile:
             raise HTTPException(status_code=404, detail="Target profile does not exist.")
-
     try:
         content = await file.read()
         root = ET.fromstring(content)
         body = root.find("body")
         if body is None:
-            raise HTTPException(status_code=400, detail="Invalid OPML structure: missing body block.")
+            raise HTTPException(status_code=400, detail="Invalid OPML: missing body.")
 
         imported_feeds = []
         def walk_nodes(node, category="Uncategorised"):
@@ -881,15 +864,13 @@ async def import_profile_opml(profile_id: int, file: UploadFile = File(...)):
                     imported_feeds.append({
                         "title": clean_text(title),
                         "category": clean_text(category) or "Uncategorised",
-                        "xml_url": xml_url,
-                        "html_url": html_url
+                        "xml_url": xml_url, "html_url": html_url
                     })
                 else:
                     next_cat = child.attrib.get("title") or child.attrib.get("text") or category
                     walk_nodes(child, next_cat)
 
         walk_nodes(body)
-
         inserted_count = 0
         with db() as conn:
             for f in imported_feeds:
@@ -901,15 +882,11 @@ async def import_profile_opml(profile_id: int, file: UploadFile = File(...)):
                     inserted_count += 1
 
         threading.Thread(target=refresh_all_feeds, daemon=True).start()
-        return {
-            "status": "success",
-            "total_found": len(imported_feeds),
-            "newly_added": inserted_count
-        }
+        return {"status": "success", "total_found": len(imported_feeds), "newly_added": inserted_count}
     except ET.ParseError:
-        raise HTTPException(status_code=400, detail="Failed to parse file. Ensure it is a valid OPML XML file.")
+        raise HTTPException(status_code=400, detail="Failed to parse OPML XML.")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Internal import error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Import error: {str(e)}")
 EOF
 
 # -----------------------------------------------------------------
@@ -920,15 +897,15 @@ cat > app/static/index.html <<'FRONTENDHTML'
 <html lang="en-GB">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
   <title>Lee's Feeds</title>
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
   <header class="hero">
     <div class="heroTitle">
-      <h1 id="homeBtn" role="button" tabindex="0" title="Back to all stories">Lee's Feeds</h1>
-      <p id="stats" class="muted" style="cursor: pointer; display: flex; gap: 14px; align-items: center;" title="Click to view error log feeds"></p>
+      <h1 id="homeBtn" role="button" tabindex="0">Lee's Feeds</h1>
+      <p id="stats" class="muted" style="cursor:pointer; display:flex; gap:14px; align-items:center;" title="Click to view feed errors"></p>
     </div>
     <div class="heroActions">
       <button id="digestBtn" class="secondary">Security digest</button>
@@ -941,8 +918,8 @@ cat > app/static/index.html <<'FRONTENDHTML'
 
   <main>
     <section class="controls">
-      <div class="profile-select-wrapper" style="display: flex; align-items: center;">
-        <select id="profileSelect" style="padding: 6px 10px; min-width: 120px;"></select>
+      <div class="profile-select-wrapper">
+        <select id="profileSelect"></select>
       </div>
       <input id="search" type="search" placeholder="Search…" autocomplete="off" />
       <select id="category"><option value="">All categories</option></select>
@@ -957,18 +934,16 @@ cat > app/static/index.html <<'FRONTENDHTML'
         <span>Starred only</span>
       </label>
     </section>
-
+    
     <p id="status" class="status"></p>
-    
     <section id="grid" class="grid"></section>
-    
     <section id="healthPanel" class="healthPanel hidden"></section>
 
     <div id="editModal" class="modal hidden">
       <div class="modal-content">
         <h3 id="modalTitle" style="margin-bottom: 15px; font-weight: 800;">Edit Properties</h3>
         <div id="modalBody"></div>
-        <div class="modal-actions" style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px;">
+        <div class="modal-actions">
           <button id="modalCancelBtn" class="secondary">Cancel</button>
           <button id="modalSaveBtn">Save Changes</button>
         </div>
@@ -991,7 +966,6 @@ cat > app/static/index.html <<'FRONTENDHTML'
       unreadOnly: true,
       starredOnly: false,
       securityDigest: false,
-      
       offset: 0,
       limit: 30,
       hasMore: true,
@@ -1039,6 +1013,7 @@ cat > app/static/index.html <<'FRONTENDHTML'
         const o = document.createElement("option");
         o.value = c.category;
         o.textContent = `${c.category} (${c.feed_count})`;
+        sel.appendChild(o);
       });
       sel.value = cur || state.category;
     }
@@ -1047,15 +1022,25 @@ cat > app/static/index.html <<'FRONTENDHTML'
       if (!state.meta) return;
       const m = state.meta;
       const filterLabel = state.securityDigest ? " · security digest" : state.category ? ` · ${state.category}` : "";
-      
       el("stats").innerHTML = `
-        <span title="${m.feed_count} tracking channels">📡 ${m.feed_count}</span>
-        <span title="${m.item_count} cached posts">📖 ${m.item_count}</span>
-        <span title="${m.unread_count} unread links">✉️ ${m.unread_count}</span>
-        <span title="${m.starred_count} bookmarks">⭐ ${m.starred_count}</span>
-        ${m.error_count ? `<span title="${m.error_count} connection errors" style="color: var(--danger); font-weight: bold;">⚠️ ${m.error_count}</span>` : ""}
-        <span class="filter-lbl" style="font-style: italic; margin-left: 4px; color: var(--accent); font-weight: 500;">${filterLabel}</span>
+        <span title="${m.feed_count} feeds">📡 ${m.feed_count}</span>
+        <span title="${m.item_count} stories">📖 ${m.item_count}</span>
+        <span title="${m.unread_count} unread">✉️ ${m.unread_count}</span>
+        <span title="${m.starred_count} starred">⭐ ${m.starred_count}</span>
+        ${m.error_count ? `<span title="${m.error_count} errors" style="color:var(--text-main); font-weight:bold;">⚠️ ${m.error_count}</span>` : ""}
+        <span style="font-style:italic; color:#94a3b8;">${filterLabel}</span>
       `;
+    }
+
+    function updateStatusLabel() {
+      const statusEl = el("status");
+      if (!statusEl) return;
+      if (!state.items.length) {
+        statusEl.textContent = state.unreadOnly ?
+          "All caught up — no unread stories." : "No stories matched your filters.";
+      } else {
+        statusEl.textContent = "";
+      }
     }
 
     async function loadFeeds() {
@@ -1097,7 +1082,6 @@ cat > app/static/index.html <<'FRONTENDHTML'
       p.set("limit", state.limit.toString());
       p.set("offset", state.offset.toString());
 
-      el("status").textContent = "Loading…";
       el("grid").classList.add("loading");
       try {
         state.items = await api(`/api/items?${p}`);
@@ -1106,7 +1090,6 @@ cat > app/static/index.html <<'FRONTENDHTML'
         }
       } catch(e) { console.error(e); }
       el("grid").classList.remove("loading");
-      
       el("grid").innerHTML = "";
       renderItems(state.items);
       updateStatusLabel();
@@ -1140,16 +1123,6 @@ cat > app/static/index.html <<'FRONTENDHTML'
         }
       } catch(e) { console.error(e); }
       state.loadingMore = false;
-      updateStatusLabel();
-    }
-
-    function updateStatusLabel() {
-      if (!state.items.length) {
-        el("status").textContent = state.unreadOnly ?
-          "All caught up — no unread stories." : "No stories matched your filters.";
-      } else {
-        el("status").textContent = ""; 
-      }
     }
 
     function renderItems(chunk) {
@@ -1157,13 +1130,10 @@ cat > app/static/index.html <<'FRONTENDHTML'
       chunk.forEach(item => {
         const card = document.createElement("article");
         card.className = `card ${item.is_read ? 'read' : 'unread'}`;
-        card.style.cursor = "pointer";
-        
         let imgHtml = "";
         if (item.image_url) {
           imgHtml = `<div class="cardImage"><img src="${esc(item.image_url)}" alt="" loading="lazy" /></div>`;
         }
-
         card.innerHTML = `
           ${imgHtml}
           <div class="cardBody">
@@ -1171,410 +1141,652 @@ cat > app/static/index.html <<'FRONTENDHTML'
               <span class="categoryTag">${esc(item.category)}</span>
               <span class="feedTitleTag">${esc(item.feed_title)}</span>
               ${item.author ? `<span class="authorTag">by ${esc(item.author)}</span>` : ''}
+              <span class="dateTag">${fmtDate(item.published)}</span>
             </div>
-            <h2 class="cardTitle"><a class="story-anchor" href="${esc(item.link)}" target="_blank" rel="noopener">${esc(item.title)}</a></h2>
+            <h2 class="cardTitle"><a href="${esc(item.link)}" target="_blank" rel="noopener">${esc(item.title)}</a></h2>
             <p class="cardTeaser">${esc(item.teaser)}</p>
-            <div class="cardTime">${fmtDate(item.published)}</div>
-            <div class="cardActions">
-              <button class="btnRead secondary">${item.is_read ? 'Mark unread' : 'Mark read'}</button>
-              <button class="btnStar secondary">${item.is_starred ? '★ Starred' : '☆ Star'}</button>
+            <div class="cardSummaryActions">
+              <span class="iconAction starBtn" title="Toggle Star">${item.is_starred ? '★' : '☆'}</span>
+              <span class="iconAction readToggleBtn" title="Toggle Read State">${item.is_read ? '🗙' : '✔'}</span>
             </div>
           </div>
         `;
 
-        card.addEventListener("click", async (e) => {
-          if (e.target.closest(".cardActions")) return;
-
-          if (!item.is_read) {
-            const res = await api(`/api/items/${item.id}`, { method: "PATCH", body: JSON.stringify({ is_read: true }) });
-            item.is_read = res.is_read;
-            
-            if (state.unreadOnly) {
-              card.remove();
-              state.items = state.items.filter(i => i.id !== item.id);
-              updateStatusLabel();
-            } else {
-              card.className = "card read";
-              card.querySelector(".btnRead").textContent = "Mark unread";
-            }
-            loadMeta();
-            loadFeeds();
-          }
-
-          if (!e.target.classList.contains("story-anchor")) {
-            window.open(item.link, "_blank", "noopener,noreferrer");
-          }
-        });
-
-        card.querySelector(".btnRead").onclick = async (e) => {
-          e.stopPropagation();
-          const res = await api(`/api/items/${item.id}`, { method: "PATCH", body: JSON.stringify({ is_read: !item.is_read }) });
-          item.is_read = res.is_read;
-          
-          if (state.unreadOnly && item.is_read) {
-            card.remove();
-            state.items = state.items.filter(i => i.id !== item.id);
-            updateStatusLabel();
-          } else {
-            card.className = `card ${item.is_read ? 'read' : 'unread'}`;
-            card.querySelector(".btnRead").textContent = item.is_read ? 'Mark unread' : 'Mark read';
-          }
-          loadMeta();
-          loadFeeds();
-        };
-
-        card.querySelector(".btnStar").onclick = async (e) => {
-          e.stopPropagation();
-          const res = await api(`/api/items/${item.id}`, { method: "PATCH", body: JSON.stringify({ is_starred: !item.is_starred }) });
-          item.is_starred = res.is_starred;
-          card.querySelector(".btnStar").textContent = item.is_starred ? '★ Starred' : '☆ Star';
-          loadMeta();
-        };
-
+        card.querySelector(".readToggleBtn").addEventListener("click", () => toggleRead(item, card));
+        card.querySelector(".starBtn").addEventListener("click", () => toggleStar(item, card));
         grid.appendChild(card);
       });
+    }
+
+    async function toggleRead(item, card) {
+      const nextState = !item.is_read;
+      try {
+        const updated = await api(`/api/items/${item.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ is_read: nextState })
+        });
+        item.is_read = updated.is_read;
+        card.className = `card ${item.is_read ? 'read' : 'unread'}`;
+        card.querySelector(".readToggleBtn").textContent = item.is_read ? '🗙' : '✔';
+        await loadMeta();
+      } catch (e) { console.error(e); }
+    }
+
+    async function toggleStar(item, card) {
+      const nextState = !item.is_starred;
+      try {
+        const updated = await api(`/api/items/${item.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ is_starred: nextState })
+        });
+        item.is_starred = updated.is_starred;
+        const btn = card.querySelector(".starBtn");
+        btn.textContent = item.is_starred ? '★' : '☆';
+        await loadMeta();
+      } catch (e) { console.error(e); }
     }
 
     async function showHealth() {
       state.mode = "health";
       el("grid").classList.add("hidden");
-      el("healthPanel").classList.remove("hidden");
-      el("status").textContent = "Loading feed health diagnostic analytics…";
-      
-      state.health = await api(`/api/health?profile_id=${state.currentProfileId}`);
-      el("status").textContent = `Feed Health Check — ${state.health.length} monitored paths`;
-      let h = `<table class="healthTable">
-        <thead>
-          <tr><th>Feed Stream / Group</th><th>Status</th><th>Checked</th><th>Telemetry / Issue Log</th></tr>
-        </thead>
-        <tbody>`;
-      state.health.forEach(f => {
-        const st = f.status === 'error' ? '❌ Issue' : '✔ Healthy';
-        h += `<tr>
-          <td><strong>${esc(f.title)}</strong><br/><small class="muted">${esc(f.category)}</small></td>
-          <td><span class="statusBadge ${f.status}">${st}</span></td>
-          <td>${fmtDate(f.last_checked)}</td>
-          <td><small>${esc(f.last_error || 'Active connection healthy')}</small></td>
-        </tr>`;
-      });
-      h += `</tbody></table>`;
-      el("healthPanel").innerHTML = h;
+      const panel = el("healthPanel");
+      panel.classList.remove("hidden");
+      panel.innerHTML = "Loading parameters…";
+
+      try {
+        state.health = await api(`/api/health?profile_id=${state.currentProfileId}`);
+        panel.innerHTML = `
+          <h2 style="margin-bottom:16px; color:#f8fafc;">Feed Synchronization Diagnostics</h2>
+          <table class="healthTable">
+            <thead>
+              <tr>
+                <th>Stream Label</th>
+                <th>Category</th>
+                <th>Status</th>
+                <th>Count</th>
+                <th>Latest Capture</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${state.health.map(f => `
+                <tr class="status-${f.status}">
+                  <td>
+                    <strong>${esc(f.title)}</strong><br/>
+                    <small style="color:#94a3b8;">${esc(f.xml_url)}</small>
+                    ${f.last_error ? `<div class="errorText">${esc(f.last_error)}</div>` : ''}
+                  </td>
+                  <td>${esc(f.category)}</td>
+                  <td><span class="badge badge-${f.status}">${f.status}</span></td>
+                  <td>${f.unread_count} / ${f.item_count}</td>
+                  <td>${fmtDate(f.last_item_fetched_at) || 'Never'}</td>
+                  <td>
+                    <button class="smallEditFeedBtn" data-id="${f.id}">Edit</button>
+                    <button class="smallDeleteFeedBtn danger" data-id="${f.id}">Delete</button>
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        `;
+
+        panel.querySelectorAll(".smallEditFeedBtn").forEach(b => {
+          b.addEventListener("click", () => openEditFeedModal(Number(b.dataset.id)));
+        });
+        panel.querySelectorAll(".smallDeleteFeedBtn").forEach(b => {
+          b.addEventListener("click", () => deleteFeed(Number(b.dataset.id)));
+        });
+
+      } catch(e) { panel.innerHTML = "Failed diagnostics fetch."; }
     }
 
-    window.triggerOpmlImport = async function() {
-      const fileInput = document.getElementById("opmlFileInput");
-      if (!fileInput.files.length) return alert("Please select an OPML file to import.");
-      
-      const formData = new FormData();
-      formData.append("file", fileInput.files[0]);
-      
-      el("status").textContent = "Uploading and parsing OPML data...";
-      try {
-        const response = await fetch(`/api/profiles/${state.currentProfileId}/import`, {
-          method: "POST",
-          body: formData
-        });
-        if (!response.ok) throw new Error(await response.text());
-        const res = await response.json();
-        alert(`Import processed successfully.\nTotal feeds detected: ${res.total_found}\nNewly added configurations: ${res.newly_added}`);
-        await loadFeeds();
-        await loadMeta();
-        showManageFeeds();
-      } catch (err) {
-        console.error(err);
-        alert(`Failed to import OPML content: ${err.message}`);
-        el("status").textContent = "OPML Import execution failed.";
-      }
-    };
+    function openEditFeedModal(id) {
+      const f = state.health.find(x => x.id === id);
+      if (!f) return;
+      el("modalTitle").textContent = "Edit Feed Settings";
+      el("modalBody").innerHTML = `
+        <div class="form-field" style="margin-bottom:12px;">
+          <label style="display:block; margin-bottom:4px; color:#cbd5e1;">Feed Name</label>
+          <input type="text" id="editFeedTitle" value="${esc(f.title)}" />
+        </div>
+        <div class="form-field" style="margin-bottom:12px;">
+          <label style="display:block; margin-bottom:4px; color:#cbd5e1;">Category Assignment</label>
+          <input type="text" id="editFeedCategory" value="${esc(f.category)}" />
+        </div>
+        <div class="form-field" style="margin-bottom:12px;">
+          <label style="display:block; margin-bottom:4px; color:#cbd5e1;">XML Endpoint Address</label>
+          <input type="url" id="editFeedXmlUrl" value="${esc(f.xml_url)}" />
+        </div>
+        <div class="form-field">
+          <label style="display:block; margin-bottom:4px; color:#cbd5e1;">Homepage Web Address</label>
+          <input type="url" id="editFeedHtmlUrl" value="${esc(f.html_url)}" />
+        </div>
+      `;
 
-    window.triggerOpmlExport = function() {
-      window.location.href = `/api/profiles/${state.currentProfileId}/export`;
-    };
+      const saveBtn = el("modalSaveBtn");
+      const clone = saveBtn.cloneNode(true);
+      saveBtn.parentNode.replaceChild(clone, saveBtn);
+
+      clone.addEventListener("click", async () => {
+        const payload = {
+          title: el("editFeedTitle").value.trim(),
+          category: el("editFeedCategory").value.trim(),
+          xml_url: el("editFeedXmlUrl").value.trim(),
+          html_url: el("editFeedHtmlUrl").value.trim()
+        };
+        if (!payload.title || !payload.category || !payload.xml_url) return alert("Fill required fields.");
+        try {
+          await api(`/api/feeds/${id}`, { method: "PUT", body: JSON.stringify(payload) });
+          closeModal();
+          showHealth();
+          loadMeta();
+        } catch(e) { alert(e); }
+      });
+
+      el("editModal").classList.remove("hidden");
+    }
+
+    async function deleteFeed(id) {
+      if (!confirm("Confirm complete feed metadata and matching stories drop?")) return;
+      try {
+        await api(`/api/feeds/${id}`, { method: "DELETE" });
+        showHealth();
+        loadMeta();
+      } catch(e) { alert(e); }
+    }
 
     function showManageFeeds() {
       state.mode = "manage";
       el("grid").classList.add("hidden");
-      el("healthPanel").classList.remove("hidden");
-      el("status").textContent = "Profile Feed Configuration Manager";
+      const panel = el("healthPanel");
+      panel.classList.remove("hidden");
 
-      let h = `<div class="manage-forms" style="margin-bottom: 25px; padding: 20px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; display: flex; flex-direction: column; gap: 20px;">
-        <div style="display: flex; flex-direction: column; gap: 10px;">
-          <h4 style="font-weight: 800;">Add New Feed Stream to Current Profile</h4>
-          <div style="display: flex; flex-wrap: wrap; gap: 10px;">
-            <input id="newFeedTitle" placeholder="Feed Title" type="text" />
-            <input id="newFeedCat" placeholder="Category" type="text" />
-            <input id="newFeedXml" placeholder="XML Feed URL" type="text" style="flex: 1; min-width: 250px;" />
-            <button id="submitNewFeedBtn">Add Stream</button>
-          </div>
-        </div>
-        <hr style="border: 0; border-top: 1px solid var(--border);" />
-        <div style="display: flex; flex-direction: column; gap: 10px;">
-          <h4 style="font-weight: 800;">Create New Isolated Profile</h4>
-          <div style="display: flex; gap: 10px;">
-            <input id="newProfileName" placeholder="New Profile Name" type="text" style="flex: 1;" />
-            <button id="submitNewProfileBtn" class="secondary">Create Profile</button>
-          </div>
-        </div>
-        <hr style="border: 0; border-top: 1px solid var(--border);" />
-        <div style="display: flex; flex-direction: column; gap: 12px;">
-          <h4 style="font-weight: 800;">OPML Data Portability (Import / Export)</h4>
-          <div style="display: flex; align-items: center; flex-wrap: wrap; gap: 15px; background: #1e293b; padding: 12px; border-radius: 6px; border: 1px solid var(--border);">
-            <div style="display: flex; flex-direction: column; gap: 4px;">
-              <span style="font-size: 0.8rem; font-weight: bold; color: var(--text-muted);">Import OPML XML File:</span>
-              <input type="file" id="opmlFileInput" accept=".opml,.xml" style="font-size: 0.85rem;" />
+      panel.innerHTML = `
+        <div style="max-width: 600px; margin: 0 auto; background:#1e293b; padding:24px; border-radius:8px; border:1px solid #334155;">
+          <h2 style="margin-bottom:20px; color:#f8fafc;">Feed Management Control</h2>
+          
+          <div style="padding-bottom:20px; margin-bottom:20px; border-bottom:1px dashed #334155;">
+            <h3 style="margin-bottom:12px; font-size:1.1rem; color:#cbd5e1;">Switch / Generate Dynamic Profile</h3>
+            <div style="display:flex; gap:10px; margin-bottom:10px;">
+              <select id="manageProfileDropdown" style="flex:1; padding:8px; background:#0f172a; color:#fff; border:1px solid #334155; border-radius:6px;"></select>
+              <button id="switchToProfileBtn">Switch Context</button>
             </div>
-            <button id="importOpmlBtn" style="padding: 6px 14px;" onclick="triggerOpmlImport()">Upload & Merge</button>
-            <div style="margin-left: auto; display: flex; flex-direction: column; gap: 4px; align-items: flex-end;">
-              <span style="font-size: 0.8rem; font-weight: bold; color: var(--text-muted);">Backup context:</span>
-              <button id="exportOpmlBtn" class="secondary" style="padding: 6px 14px;" onclick="triggerOpmlExport()">Download Profile OPML</button>
+            <div style="display:flex; gap:10px;">
+              <input type="text" id="newProfileName" placeholder="New profile token ID..." style="flex:1; padding:8px; background:#0f172a; color:#fff; border:1px solid #334155; border-radius:6px;" />
+              <button id="createProfileBtn" class="secondary">Add Profile</button>
             </div>
           </div>
+
+          <div>
+            <h3 style="margin-bottom:12px; font-size:1.1rem; color:#cbd5e1;">Register New Subscription Target</h3>
+            <div style="display:grid; grid-template-columns:1fr; gap:12px; margin-bottom:16px;">
+              <input type="text" id="addFeedTitle" placeholder="Custom feed shorthand title (e.g. Wired Security)" style="background:#0f172a; color:#fff; border:1px solid #334155; padding:8px; border-radius:6px;" />
+              <input type="text" id="addFeedCategory" placeholder="Target Category box grouping (e.g. Security)" style="background:#0f172a; color:#fff; border:1px solid #334155; padding:8px; border-radius:6px;" />
+              <input type="url" id="addFeedXmlUrl" placeholder="Direct link RSS/Atom XML endpoint" style="background:#0f172a; color:#fff; border:1px solid #334155; padding:8px; border-radius:6px;" />
+              <input type="url" id="addFeedHtmlUrl" placeholder="Optional standard website homepage URL" style="background:#0f172a; color:#fff; border:1px solid #334155; padding:8px; border-radius:6px;" />
+            </div>
+            <button id="submitNewFeedBtn" style="width:100%; padding:10px;">Register Stream Instance</button>
+          </div>
+
+          <div style="padding-top:20px; margin-top:4px; border-top:1px dashed #334155;">
+            <h3 style="margin-bottom:12px; font-size:1.1rem; color:#cbd5e1;">OPML Import / Export</h3>
+            <div style="display:flex; align-items:center; flex-wrap:wrap; gap:12px; background:#0f172a; padding:14px; border-radius:6px; border:1px solid #334155;">
+              <div style="display:flex; flex-direction:column; gap:4px;">
+                <span style="font-size:0.8rem; font-weight:bold; color:#94a3b8;">Import OPML file:</span>
+                <input type="file" id="opmlFileInput" accept=".opml,.xml" style="font-size:0.85rem; min-height:auto; padding:4px; background:transparent; border:none; color:#94a3b8;" />
+              </div>
+              <button id="importOpmlBtn" class="secondary" style="padding:8px 14px;">Upload &amp; Merge</button>
+              <div style="margin-left:auto; display:flex; flex-direction:column; gap:4px; align-items:flex-end;">
+                <span style="font-size:0.8rem; font-weight:bold; color:#94a3b8;">Backup feeds:</span>
+                <button id="exportOpmlBtn" class="secondary" style="padding:8px 14px;">Download OPML</button>
+              </div>
+            </div>
+          </div>
         </div>
-      </div>`;
-      h += `<table class="healthTable">
-        <thead><tr><th>Title</th><th>Category</th><th>XML Stream URL</th><th>Actions</th></tr></thead>
-        <tbody>`;
-      state.feeds.forEach(f => {
-        h += `<tr>
-          <td><strong>${esc(f.title)}</strong></td>
-          <td>${esc(f.category)}</td>
-          <td><small>${esc(f.xml_url)}</small></td>
-          <td>
-            <button class="secondary" style="padding: 4px 8px; font-size: 0.75rem;" onclick="openEditFeedModal(${f.id})">Modify</button>
-            <button class="secondary" style="padding: 4px 8px; font-size: 0.75rem; color: var(--danger);" onclick="deleteFeedItem(${f.id})">Remove</button>
-          </td>
-        </tr>`;
+      `;
+
+      const profSel = el("manageProfileDropdown");
+      profSel.innerHTML = "";
+      state.profiles.forEach(p => {
+        const o = document.createElement("option");
+        o.value = p.id;
+        o.textContent = p.name;
+        profSel.appendChild(o);
       });
-      h += `</tbody></table>`;
-      el("healthPanel").innerHTML = h;
+      profSel.value = state.currentProfileId;
 
-      el("submitNewFeedBtn").onclick = async () => {
-        const title = el("newFeedTitle").value;
-        const category = el("newFeedCat").value;
-        const xml_url = el("newFeedXml").value;
-        if(!title || !xml_url) return alert("Title and XML Url fields are required.");
-        await api(`/api/feeds?profile_id=${state.currentProfileId}`, { method: "POST", body: JSON.stringify({ title, category, xml_url }) });
-        await loadFeeds(); loadMeta(); showManageFeeds();
-      };
-      el("submitNewProfileBtn").onclick = async () => {
-        const name = el("newProfileName").value;
-        if(!name) return alert("Profile name required.");
-        const p = await api("/api/profiles", { method: "POST", body: JSON.stringify({ name }) });
-        state.currentProfileId = p.id;
-        await loadProfiles(); await loadMeta(); await loadFeeds(); showManageFeeds();
-      };
+      el("switchToProfileBtn").addEventListener("click", async () => {
+        state.currentProfileId = Number(profSel.value);
+        await initApplicationContext();
+        showManageFeeds();
+      });
+
+      el("createProfileBtn").addEventListener("click", async () => {
+        const name = el("newProfileName").value.trim();
+        if (!name) return;
+        try {
+          const res = await api("/api/profiles", { method: "POST", body: JSON.stringify({ name }) });
+          state.currentProfileId = res.id;
+          await loadProfiles();
+          await initApplicationContext();
+          showManageFeeds();
+        } catch(e) { alert(e); }
+      });
+
+      el("submitNewFeedBtn").addEventListener("click", async () => {
+        const payload = {
+          title: el("addFeedTitle").value.trim(),
+          category: el("addFeedCategory").value.trim(),
+          xml_url: el("addFeedXmlUrl").value.trim(),
+          html_url: el("addFeedHtmlUrl").value.trim()
+        };
+        if (!payload.title || !payload.category || !payload.xml_url) return alert("Fill core subscription parameters.");
+        try {
+          await api(`/api/feeds?profile_id=${state.currentProfileId}`, { method: "POST", body: JSON.stringify(payload) });
+          alert("Feed registered!");
+          el("addFeedTitle").value = "";
+          el("addFeedCategory").value = "";
+          el("addFeedXmlUrl").value = "";
+          el("addFeedHtmlUrl").value = "";
+          await loadMeta();
+          await loadFeeds();
+        } catch(e) { alert(e); }
+      });
+
+      el("importOpmlBtn").addEventListener("click", async () => {
+        const fileInput = el("opmlFileInput");
+        if (!fileInput.files.length) return alert("Select an OPML file first.");
+        const formData = new FormData();
+        formData.append("file", fileInput.files[0]);
+        try {
+          const response = await fetch(`/api/profiles/${state.currentProfileId}/import`, { method: "POST", body: formData });
+          if (!response.ok) throw new Error(await response.text());
+          const res = await response.json();
+          alert(`Import complete.\nFeeds found: ${res.total_found}\nNewly added: ${res.newly_added}`);
+          await loadMeta();
+          await loadFeeds();
+          showManageFeeds();
+        } catch(e) { alert(`Import failed: ${e.message}`); }
+      });
+
+      el("exportOpmlBtn").addEventListener("click", () => {
+        window.location.href = `/api/profiles/${state.currentProfileId}/export`;
+      });
     }
 
-    window.openEditFeedModal = function(feedId) {
-      const f = state.feeds.find(feed => feed.id === feedId);
-      if(!f) return;
-      el("modalTitle").textContent = "Edit Feed Subscription";
-      el("modalBody").innerHTML = `
-        <label style="display:block; margin-bottom:12px;">
-          <span style="font-size:0.85rem; color:var(--text-muted); font-weight:700;">Feed Title</span>
-          <input id="editFeedTitle" type="text" value="${esc(f.title)}" style="width:100%; padding:8px; margin-top:4px; background:#1e293b; color:#fff; border:1px solid var(--border); border-radius:6px;"/>
-        </label>
-        <label style="display:block; margin-bottom:12px;">
-          <span style="font-size:0.85rem; color:var(--text-muted); font-weight:700;">Category</span>
-          <input id="editFeedCat" type="text" value="${esc(f.category)}" style="width:100%; padding:8px; margin-top:4px; background:#1e293b; color:#fff; border:1px solid var(--border); border-radius:6px;"/>
-        </label>
-        <label style="display:block; margin-bottom:12px;">
-          <span style="font-size:0.85rem; color:var(--text-muted); font-weight:700;">XML Url Stream</span>
-          <input id="editFeedXml" type="text" value="${esc(f.xml_url)}" style="width:100%; padding:8px; margin-top:4px; background:#1e293b; color:#fff; border:1px solid var(--border); border-radius:6px;"/>
-        </label>
-      `;
-      el("editModal").classList.remove("hidden");
-      el("modalSaveBtn").onclick = async () => {
-        await api(`/api/feeds/${feedId}`, {
-          method: "PUT",
-          body: JSON.stringify({ title: el("editFeedTitle").value, category: el("editFeedCat").value, xml_url: el("editFeedXml").value })
-        });
-        el("editModal").classList.add("hidden");
-        await loadFeeds(); loadMeta(); showManageFeeds();
-      };
-    };
+    function closeModal() { el("editModal").classList.add("hidden"); }
 
-    window.deleteFeedItem = async function(feedId) {
-      if(!confirm("Are you completely sure you want to remove this tracking stream?")) return;
-      await api(`/api/feeds/${feedId}`, { method: "DELETE" });
-      await loadFeeds(); loadMeta(); showManageFeeds();
-    };
+    async function initApplicationContext() {
+      await loadMeta();
+      await loadFeeds();
+      if (state.mode === "stories") await loadItems();
+    }
+
+    el("homeBtn").addEventListener("click", () => {
+      state.category = ""; state.feedId = ""; state.q = ""; state.securityDigest = false;
+      el("category").value = ""; el("feed").value = ""; el("search").value = "";
+      state.mode = "stories";
+      initApplicationContext();
+    });
+
+    el("stats").addEventListener("click", () => {
+      if (state.meta && state.meta.error_count > 0) showHealth();
+    });
+
+    el("category").addEventListener("change", e => {
+      state.category = e.target.value;
+      state.feedId = "";
+      renderFeedSelect();
+      loadItems();
+    });
+
+    el("feed").addEventListener("change", e => {
+      state.feedId = e.target.value;
+      loadItems();
+    });
+
+    let searchTimeout;
+    el("search").addEventListener("input", e => {
+      clearTimeout(searchTimeout);
+      searchTimeout = setTimeout(() => {
+        state.q = e.target.value.trim();
+        loadItems();
+      }, 250);
+    });
+
+    el("unreadOnly").addEventListener("change", e => { state.unreadOnly = e.target.checked; loadItems(); });
+    el("starredOnly").addEventListener("change", e => { state.starredOnly = e.target.checked; loadItems(); });
+
+    el("digestBtn").addEventListener("click", () => {
+      state.securityDigest = true; state.category = ""; state.feedId = "";
+      el("category").value = ""; el("feed").value = "";
+      loadItems();
+    });
+    el("healthBtn").addEventListener("click", showHealth);
+    el("manageFeedsBtn").addEventListener("click", showManageFeeds);
+
+    el("markReadBtn").addEventListener("click", async () => {
+      const p = new URLSearchParams();
+      p.set("profile_id", state.currentProfileId);
+      if (state.category) p.set("category", state.category);
+      if (state.feedId) p.set("feed_id", state.feedId);
+      try {
+        await api(`/api/items/mark-all-read?${p}`, { method: "POST" });
+        initApplicationContext();
+      } catch(e) { console.error(e); }
+    });
+
+    el("refreshBtn").addEventListener("click", async () => {
+      el("refreshBtn").disabled = true;
+      try {
+        await api("/api/refresh", { method: "POST" });
+        setTimeout(() => { el("refreshBtn").disabled = false; initApplicationContext(); }, 2000);
+      } catch(e) { el("refreshBtn").disabled = false; }
+    });
+
+    el("profileSelect").addEventListener("change", e => {
+      state.currentProfileId = Number(e.target.value);
+      state.category = ""; state.feedId = "";
+      initApplicationContext();
+    });
+
+    el("modalCancelBtn").addEventListener("click", closeModal);
 
     window.addEventListener("scroll", () => {
-      if (state.mode !== "stories" || !state.hasMore || state.loadingMore) return;
-      if ((window.innerHeight + window.scrollY) >= (document.documentElement.scrollHeight - 600)) {
+      if ((window.innerHeight + window.scrollY) >= document.documentElement.scrollHeight - 150) {
         loadMoreItems();
       }
     });
 
-    el("profileSelect").onchange = async (ev) => {
-      state.currentProfileId = parseInt(ev.target.value);
-      state.category = ""; state.feedId = "";
-      await loadMeta(); await loadFeeds();
-      if(state.mode === "stories") loadItems();
-      else if(state.mode === "health") showHealth();
-      else showManageFeeds();
-    };
-
-    el("category").onchange = ev => { state.category = ev.target.value; state.feedId = ""; renderFeedSelect(); loadItems(); };
-    el("feed").onchange = ev => { state.feedId = ev.target.value; loadItems(); };
-    el("search").oninput = ev => { state.q = ev.target.value.trim(); loadItems(); };
-    el("unreadOnly").onchange = ev => { state.unreadOnly = ev.target.checked; loadItems(); };
-    el("starredOnly").onchange = ev => { state.starredOnly = ev.target.checked; loadItems(); };
-    el("homeBtn").onclick = () => { state.category = ""; state.feedId = ""; state.securityDigest = false; el("category").value = ""; el("digestBtn").classList.remove("active"); renderFeedSelect(); loadItems(); };
-    el("digestBtn").onclick = () => { state.securityDigest = !state.securityDigest; el("digestBtn").classList.toggle("active", state.securityDigest); loadItems(); };
-    el("healthBtn").onclick = () => { if(state.mode === "health") loadItems(); else showHealth(); };
-    el("manageFeedsBtn").onclick = () => { if(state.mode === "manage") loadItems(); else showManageFeeds(); };
-    el("modalCancelBtn").onclick = () => el("editModal").classList.add("hidden");
-    
-    el("stats").onclick = () => {
-      if (state.meta && state.meta.error_count > 0) {
-        showHealth();
-      }
-    };
-
-    el("markReadBtn").onclick = async () => {
-      await api(`/api/items/mark-all-read?profile_id=${state.currentProfileId}${state.category ? `&category=${encodeURIComponent(state.category)}` : ''}${state.feedId ? `&feed_id=${state.feedId}` : ''}`, { method: "POST" });
-      await loadItems();
-      await loadMeta();
-      await loadFeeds();
-    };
-
-    el("refreshBtn").onclick = async () => {
-      await api("/api/refresh", { method: "POST" });
-      setTimeout(() => { loadMeta(); loadFeeds(); loadItems(); }, 1200);
-    };
-
-    async function initializeSystem() {
+    (async () => {
       await loadProfiles();
-      await loadMeta();
-      await loadFeeds();
-      await loadItems();
-    }
-    initializeSystem();
+      await initApplicationContext();
+    })();
   </script>
 </body>
 </html>
 FRONTENDHTML
 
 # -----------------------------------------------------------------
-# Base CSS Stylesheet — app/static/styles.css
+# CSS Clean Dark Framework Overhaul — app/static/styles.css
 # -----------------------------------------------------------------
-cat > app/static/styles.css <<'CSSEOF'
+cat > app/static/styles.css <<'CUSTOMCSS'
 :root {
-  --bg: #0f141c;
-  --bg-card: #171f2b;
-  --border: #243145;
-  --text: #e2e8f0;
-  --text-muted: #8a99ad;
-  --accent: #3b82f6;
-  --accent-hover: #2563eb;
-  --danger: #ef4444;
+  --primary: #3b82f6;
+  --primary-hover: #2563eb;
+  --bg-app: #0f172a;
+  --bg-card: #1e293b;
+  --border-color: #334155;
+  --text-main: #f8fafc;
+  --text-muted: #94a3b8;
+  --radius: 8px;
 }
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; line-height: 1.5; padding-bottom: 40px; }
-.hero { background: linear-gradient(135deg, #1e293b, #0f172a); border-bottom: 1px solid var(--border); padding: 30px 20px; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 20px; }
-.heroTitle h1 { font-size: 1.8rem; font-weight: 800; cursor: pointer; color: #fff; }
-.heroTitle h1:hover { color: var(--accent); }
-.muted { color: var(--text-muted); font-size: 0.9rem; margin-top: 4px; }
-.heroActions { display: flex; gap: 10px; flex-wrap: wrap; }
-button { background: var(--accent); color: white; border: none; padding: 8px 16px; font-weight: 600; border-radius: 6px; cursor: pointer; font-size: 0.9rem; transition: background 0.2s; }
-button:hover { background: var(--accent-hover); }
-button.secondary { background: #334155; color: #cbd5e1; }
-button.secondary:hover { background: #475569; }
-button.active { background: #059669 !important; }
-main { max-width: 1200px; margin: 0 auto; padding: 20px; }
-.controls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; background: var(--bg-card); border: 1px solid var(--border); padding: 15px; border-radius: 8px; margin-bottom: 20px; }
-input[type="search"], select, input[type="text"] { background: #1e293b; color: var(--text); border: 1px solid var(--border); padding: 8px 12px; border-radius: 6px; font-size: 0.9rem; outline: none; }
-input[type="search"] { flex: 1; min-width: 200px; }
-.toggle { display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 0.9rem; user-select: none; }
-.status { font-size: 0.9rem; color: var(--text-muted); margin-bottom: 15px; font-weight: 500; }
-.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 20px; transition: opacity 0.2s; }
-.grid.loading { opacity: 0.5; pointer-events: none; }
-.card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; display: flex; flex-direction: column; transition: transform 0.2s, box-shadow 0.2s; }
-.card:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(0,0,0,0.3); }
-.card.read { opacity: 0.65; }
-.cardImage { width: 100%; height: 180px; background: #1e293b; overflow: hidden; position: relative; border-bottom: 1px solid var(--border); }
-.cardImage img { width: 100%; height: 100%; object-fit: cover; }
-.cardBody { padding: 16px; display: flex; flex-direction: column; flex: 1; }
-.cardMeta { display: flex; flex-wrap: wrap; gap: 6px; font-size: 0.75rem; font-weight: 700; text-transform: uppercase; margin-bottom: 10px; }
-.categoryTag { color: var(--accent); }
-.feedTitleTag { color: #e11d48; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.authorTag { color: var(--text-muted); }
-.cardTitle { font-size: 1.1rem; font-weight: 700; margin-bottom: 10px; line-height: 1.4; }
-.cardTitle a { color: #fff; text-decoration: none; }
-.cardTitle a:hover { color: var(--accent); text-decoration: underline; }
-.cardTeaser { font-size: 0.9rem; color: var(--text-muted); margin-bottom: 15px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; flex: 1; }
-.cardTime { font-size: 0.8rem; color: var(--text-muted); margin-top: auto; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.05); }
-.cardActions { display: flex; gap: 8px; margin-top: 10px; }
-.cardActions button { padding: 4px 8px; font-size: 0.75rem; border-radius: 4px; }
-.healthPanel { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 20px; overflow-x: auto; }
-.healthTable { width: 100%; border-collapse: collapse; text-align: left; font-size: 0.9rem; }
-.healthTable th, .healthTable td { padding: 12px; border-bottom: 1px solid var(--border); }
-.healthTable th { background: #1e293b; font-weight: 600; color: #fff; }
-.statusBadge { padding: 2px 6px; font-size: 0.75rem; font-weight: bold; border-radius: 4px; }
-.statusBadge.healthy { background: rgba(16,185,129,0.2); color: #10b981; }
-.statusBadge.error { background: rgba(239,68,68,0.2); color: #ef4444; }
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: var(--bg-app);
+  color: var(--text-main);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  line-height: 1.4;
+  padding-top: 0;
+}
+
+/* Responsive Grid/Flex Headers */
+.hero {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.heroTitle h1 {
+  font-size: 1.4rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.muted {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.heroActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+@media (min-width: 768px) {
+  .hero {
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+    padding: 20px 32px;
+  }
+}
+
+/* Controls Framework */
+.controls {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  padding: 16px;
+}
+
+@media (min-width: 480px) {
+  .controls { grid-template-columns: repeat(2, 1fr); }
+  #search { grid-column: span 2; }
+}
+
+@media (min-width: 1024px) {
+  .controls {
+    grid-template-columns: auto 2fr repeat(2, 1fr) auto auto;
+    align-items: center;
+  }
+  #search { grid-column: span 1; }
+}
+
+/* Core Target Area Parameters */
+.controls input, 
+.controls select,
+.heroActions button,
+.modal-actions button,
+.smallEditFeedBtn, .smallDeleteFeedBtn,
+button {
+  min-height: 44px;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-color);
+  background: #111827;
+  font-size: 16px; 
+  color: var(--text-main);
+  cursor: pointer;
+  font-weight: 500;
+}
+
+button {
+  background: var(--primary);
+  border: none;
+}
+button:hover { background: var(--primary-hover); }
+
+button.secondary {
+  background: #1e293b;
+  border: 1px solid var(--border-color);
+}
+button.secondary:hover { background: #334155; }
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  cursor: pointer;
+  font-size: 14px;
+}
+.toggle input { width: 18px; height: 18px; }
+
+/* Dynamic Multi-Column Distribution */
+.grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 16px;
+  padding: 16px;
+}
+
+@media (min-width: 640px) { .grid { grid-template-columns: repeat(2, 1fr); } }
+@media (min-width: 1024px) { .grid { grid-template-columns: repeat(3, 1fr); } }
+
+/* Unified Premium Card Design */
+.card {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-card);
+  border-radius: var(--radius);
+  border: 1px solid var(--border-color);
+  overflow: hidden;
+}
+
+@media (max-width: 480px) {
+  .grid { padding: 8px 0; gap: 10px; }
+  .card { border-radius: 0; border-left: none; border-right: none; }
+}
+
+.card.read { opacity: 0.45; }
+.card.unread { border-left: 3px solid var(--primary); }
+
+.cardImage img {
+  width: 100%;
+  height: 160px;
+  object-fit: cover;
+  display: block;
+}
+
+.cardBody {
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+}
+
+.cardMeta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+.categoryTag { background: #1e3a8a; color: #93c5fd; padding: 2px 6px; border-radius: 4px; font-weight: 600; }
+.feedTitleTag { color: #f1f5f9; font-weight: 600; }
+
+.cardTitle {
+  font-size: 1.05rem;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+.cardTitle a { color: var(--text-main); text-decoration: none; }
+.cardTitle a:hover { color: var(--primary); }
+
+.cardTeaser {
+  font-size: 0.88rem;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+}
+
+/* Summary Action Icons Integration */
+.cardSummaryActions {
+  display: flex;
+  gap: 16px;
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px solid #334155;
+}
+
+.iconAction {
+  font-size: 1.25rem;
+  cursor: pointer;
+  user-select: none;
+  min-height: 44px;
+  min-width: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  transition: color 0.1s ease;
+}
+.iconAction:hover { color: var(--text-main); }
+.starBtn { color: #eab308 !important; }
+
+/* Diagnostics System Sheet overrides */
+.healthPanel { padding: 16px; background: #1e293b; margin: 16px; border-radius: var(--radius); border: 1px solid var(--border-color); overflow-x: auto; }
+.healthTable { width: 100%; border-collapse: collapse; font-size: 0.9rem; color: #f8fafc; }
+.healthTable th, .healthTable td { padding: 12px; border-bottom: 1px solid #334155; }
+.healthTable th { background: #0f172a; }
+.errorText { color: #ef4444; font-size: 0.8rem; margin-top: 4px; font-family: monospace; }
+.badge { display: inline-block; padding: 2px 6px; font-size: 0.7rem; font-weight: 600; border-radius: 4px; }
+.badge-error { background: #7f1d1d; color: #fca5a5; }
+.badge-healthy { background: #14532d; color: #86efac; }
+
+/* 6. Mobile Rigid Persistent Top Navigation Placement Overhaul */
+@media (max-width: 767px) {
+  body {
+    padding-top: 64px; /* Gives room for the top persistent menu fixed element overlay */
+  }
+
+  .heroActions {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    background: rgba(15, 23, 42, 0.93);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border-color);
+    border-top: none;
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    padding: 6px;
+    gap: 2px;
+    z-index: 1000;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  }
+  
+  .heroActions button {
+    font-size: 10px !important;
+    padding: 2px !important;
+    min-height: auto;
+    height: 48px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    border: none !important;
+    background: transparent !important;
+    color: var(--text-main) !important;
+  }
+  .heroActions button:hover { background: #1e293b !important; }
+  .heroActions button#refreshBtn { color: var(--primary) !important; font-weight: 700; }
+}
+
+/* Modals Definition Framework */
+.modal { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.7); display: flex; align-items: center; justify-content: center; z-index: 2000; padding: 16px; }
+.modal-content { background: #1e293b; padding: 24px; border-radius: var(--radius); width: 100%; max-width: 500px; border: 1px solid var(--border-color); }
+.modal input { width: 100%; background: #0f172a; color:#fff; border: 1px solid var(--border-color); padding: 10px; border-radius: 6px; margin-top: 4px; }
+.status { font-size: 0.9rem; color: var(--text-muted); margin-bottom: 15px; padding: 0 16px; font-weight: 500; }
 .hidden { display: none !important; }
-.modal { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.75); display: flex; align-items: center; justify-content: center; z-index: 1000; }
-.modal-content { background: var(--bg-card); border: 1px solid var(--border); padding: 25px; border-radius: 8px; width: 100%; max-width: 500px; }
-.modal-content h3 { margin-bottom: 15px; }
-.modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
-CSSEOF
+CUSTOMCSS
 
 # -----------------------------------------------------------------
-# Stack Deployment Execution
+# Deployment Execution Framework
 # -----------------------------------------------------------------
-echo "================================================"
-echo "Starting Stack Container Layer Rebuild..."
-echo "================================================"
-docker compose down
-docker compose up -d --build
+echo "Deployment structure compiled successfully."
 
-cat <<EOF
-
-=================================================================
-DEPLOYMENT COMPLETE
-=================================================================
-URL: https://${TS_HOSTNAME}
-
-COMMAND REF SHEET
------------------
-  Stop:    docker compose down
-  Start:   docker compose up -d
-  Rebuild: docker compose up -d --build
-  Refresh: curl -X POST https://${TS_HOSTNAME}/api/refresh
-  Backup:  cp data/opml_reader.sqlite3 "data/opml_reader.\$(date +%F).sqlite3"
-
-EDIT FEEDS & PROFILES
----------------------
-  Profiles and custom subscriptions are now handled via the UI 
-  ("Manage feeds" configuration engine view).
-  Your first profile is automatically initialized as 'Default'
-  and pre-seeded directly from your source OPML collection structure.
-
-DB PRUNING (weekly cron recommended)
---------------------------------------
-  bash scripts/prune_db.sh
-  Cron: 0 4 * * 0 bash \${PROJECT_DIR}/scripts/prune_db.sh >> \${PROJECT_DIR}/data/prune.log 2>&1
-
-CERT RENEWAL (Tailscale certs last 90 days)
---------------------------------------------
-  sudo bash scripts/renew_certs.sh
-  Cron: 0 3 * * * bash \${PROJECT_DIR}/scripts/renew_certs.sh >> \${PROJECT_DIR}/data/cert_renewal.log 2>&1
-  sudoers rule for tailscale cert and chmod:
-    lee ALL=(root) NOPASSWD: /usr/bin/tailscale cert *, /bin/chmod *
-
-OPTIONAL FIREWALL HARDENING
-----------------------------
-  sudo ufw default deny incoming
-  sudo ufw default allow outgoing
-  sudo ufw allow in on tailscale0 to any port 443 proto tcp
-  sudo ufw allow in on tailscale0 to any port 80 proto tcp
-  sudo ufw allow OpenSSH
-  sudo ufw enable
-EOF
-
-echo "================================================"
-echo "Setup Script Terminated Cleanly."
-echo "================================================"
