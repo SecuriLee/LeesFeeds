@@ -11,3 +11,4 @@ You can also create profiles (heck, it's a one-person application - no authentic
 
 Take bootstrap.sh, modify your Tailscale hostname into it and run it on a linux host.  It will search dependencies and install itself,
 all you need to do is point your browser at it.
+<img width="1017" height="643" alt="image" src="https://github.com/user-attachments/assets/05f87593-e831-496f-b1de-fd4132cac14d" />
