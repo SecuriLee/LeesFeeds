@@ -1152,23 +1152,46 @@ cat > app/static/index.html <<'FRONTENDHTML'
           </div>
         `;
 
-        card.querySelector(".readToggleBtn").addEventListener("click", () => toggleRead(item, card));
-        card.querySelector(".starBtn").addEventListener("click", () => toggleStar(item, card));
+        card.querySelector(".readToggleBtn").addEventListener("click", (e) => { e.stopPropagation(); toggleRead(item, card); });
+        card.querySelector(".starBtn").addEventListener("click", (e) => { e.stopPropagation(); toggleStar(item, card); });
+        card.querySelector(".cardTitle a").addEventListener("click", (e) => {
+          if (!item.is_read) markReadInstant(item, card);
+        });
         grid.appendChild(card);
       });
     }
 
+    function markReadInstant(item, card) {
+      item.is_read = true;
+      if (state.unreadOnly) {
+        card.remove();
+        state.items = state.items.filter(i => i.id !== item.id);
+        updateStatusLabel();
+      } else {
+        card.className = "card read";
+        const btn = card.querySelector(".readToggleBtn");
+        if (btn) btn.textContent = '🗙';
+      }
+      api(`/api/items/${item.id}`, { method: "PATCH", body: JSON.stringify({ is_read: true }) })
+        .then(() => loadMeta())
+        .catch(e => console.error(e));
+    }
+
     async function toggleRead(item, card) {
       const nextState = !item.is_read;
+      // Optimistic update
+      item.is_read = nextState;
+      if (state.unreadOnly && nextState) {
+        card.remove();
+        state.items = state.items.filter(i => i.id !== item.id);
+        updateStatusLabel();
+      } else {
+        card.className = `card ${nextState ? 'read' : 'unread'}`;
+        card.querySelector(".readToggleBtn").textContent = nextState ? '🗙' : '✔';
+      }
       try {
-        const updated = await api(`/api/items/${item.id}`, {
-          method: "PATCH",
-          body: JSON.stringify({ is_read: nextState })
-        });
-        item.is_read = updated.is_read;
-        card.className = `card ${item.is_read ? 'read' : 'unread'}`;
-        card.querySelector(".readToggleBtn").textContent = item.is_read ? '🗙' : '✔';
-        await loadMeta();
+        await api(`/api/items/${item.id}`, { method: "PATCH", body: JSON.stringify({ is_read: nextState }) });
+        loadMeta();
       } catch (e) { console.error(e); }
     }
 
