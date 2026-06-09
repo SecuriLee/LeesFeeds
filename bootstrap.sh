@@ -901,6 +901,12 @@ cat > app/static/index.html <<'FRONTENDHTML'
   <title>Lee's Feeds</title>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='6' fill='%230f172a'/%3E%3Crect x='10' y='8' width='44' height='48' rx='3' fill='none' stroke='%23fbbf24' stroke-width='3'/%3E%3Cpolyline points='42,8 54,8 54,20 42,20 42,8' fill='%230f172a' stroke='%23fbbf24' stroke-width='2.5' stroke-linejoin='round'/%3E%3Crect x='16' y='24' width='28' height='4' rx='1.5' fill='%23fbbf24'/%3E%3Crect x='16' y='32' width='22' height='2.5' rx='1' fill='%23fbbf24' opacity='.6'/%3E%3Crect x='16' y='37' width='26' height='2.5' rx='1' fill='%23fbbf24' opacity='.6'/%3E%3Crect x='16' y='42' width='18' height='2.5' rx='1' fill='%23fbbf24' opacity='.6'/%3E%3C/svg%3E" />
   <link rel="stylesheet" href="/static/styles.css" />
+  <script>
+    (function(){
+      const t = localStorage.getItem("lf-theme");
+      if (t === "light") document.documentElement.setAttribute("data-theme", "light");
+    })();
+  </script>
 </head>
 <body>
   <header class="hero">
@@ -909,6 +915,7 @@ cat > app/static/index.html <<'FRONTENDHTML'
       <p id="stats" class="muted" style="cursor:pointer; display:flex; gap:14px; align-items:center;" title="Click to view feed errors"></p>
     </div>
     <div class="heroActions">
+      <button id="themeToggleBtn" class="secondary themeToggleBtn" aria-label="Toggle light/dark mode" title="Toggle light/dark mode">☀️</button>
       <button id="healthBtn" class="secondary">Feed health</button>
       <button id="manageFeedsBtn" class="secondary">Manage feeds</button>
       <button id="markReadBtn" class="secondary">Mark read</button>
@@ -1354,17 +1361,17 @@ cat > app/static/index.html <<'FRONTENDHTML'
       panel.classList.remove("hidden");
 
       panel.innerHTML = `
-        <div style="max-width: 600px; margin: 0 auto; background:#1e293b; padding:24px; border-radius:8px; border:1px solid #334155;">
+        <div style="max-width: 600px; margin: 0 auto; background:var(--bg-card); padding:24px; border-radius:8px; border:1px solid var(--border-color);">
           <h2 style="margin-bottom:20px; color:#f8fafc;">Feed Management Control</h2>
           
           <div style="padding-bottom:20px; margin-bottom:20px; border-bottom:1px dashed #334155;">
             <h3 style="margin-bottom:12px; font-size:1.1rem; color:#cbd5e1;">Switch / Generate Dynamic Profile</h3>
             <div style="display:flex; gap:10px; margin-bottom:10px;">
-              <select id="manageProfileDropdown" style="flex:1; padding:8px; background:#0f172a; color:#fff; border:1px solid #334155; border-radius:6px;"></select>
+              <select id="manageProfileDropdown" style="flex:1; padding:8px; background:var(--bg-app); color:var(--text-main); border:1px solid var(--border-color); border-radius:6px;"></select>
               <button id="switchToProfileBtn">Switch Context</button>
             </div>
             <div style="display:flex; gap:10px;">
-              <input type="text" id="newProfileName" placeholder="New profile token ID..." style="flex:1; padding:8px; background:#0f172a; color:#fff; border:1px solid #334155; border-radius:6px;" />
+              <input type="text" id="newProfileName" placeholder="New profile token ID..." style="flex:1; padding:8px; background:var(--bg-app); color:var(--text-main); border:1px solid var(--border-color); border-radius:6px;" />
               <button id="createProfileBtn" class="secondary">Add Profile</button>
             </div>
           </div>
@@ -1372,17 +1379,17 @@ cat > app/static/index.html <<'FRONTENDHTML'
           <div>
             <h3 style="margin-bottom:12px; font-size:1.1rem; color:#cbd5e1;">Register New Subscription Target</h3>
             <div style="display:grid; grid-template-columns:1fr; gap:12px; margin-bottom:16px;">
-              <input type="text" id="addFeedTitle" placeholder="Custom feed shorthand title (e.g. Wired Security)" style="background:#0f172a; color:#fff; border:1px solid #334155; padding:8px; border-radius:6px;" />
-              <input type="text" id="addFeedCategory" placeholder="Target Category box grouping (e.g. Security)" style="background:#0f172a; color:#fff; border:1px solid #334155; padding:8px; border-radius:6px;" />
-              <input type="url" id="addFeedXmlUrl" placeholder="Direct link RSS/Atom XML endpoint" style="background:#0f172a; color:#fff; border:1px solid #334155; padding:8px; border-radius:6px;" />
-              <input type="url" id="addFeedHtmlUrl" placeholder="Optional standard website homepage URL" style="background:#0f172a; color:#fff; border:1px solid #334155; padding:8px; border-radius:6px;" />
+              <input type="text" id="addFeedTitle" placeholder="Custom feed shorthand title (e.g. Wired Security)" style="background:var(--bg-app); color:var(--text-main); border:1px solid var(--border-color); padding:8px; border-radius:6px;" />
+              <input type="text" id="addFeedCategory" placeholder="Target Category box grouping (e.g. Security)" style="background:var(--bg-app); color:var(--text-main); border:1px solid var(--border-color); padding:8px; border-radius:6px;" />
+              <input type="url" id="addFeedXmlUrl" placeholder="Direct link RSS/Atom XML endpoint" style="background:var(--bg-app); color:var(--text-main); border:1px solid var(--border-color); padding:8px; border-radius:6px;" />
+              <input type="url" id="addFeedHtmlUrl" placeholder="Optional standard website homepage URL" style="background:var(--bg-app); color:var(--text-main); border:1px solid var(--border-color); padding:8px; border-radius:6px;" />
             </div>
             <button id="submitNewFeedBtn" style="width:100%; padding:10px;">Register Stream Instance</button>
           </div>
 
           <div style="padding-top:20px; margin-top:4px; border-top:1px dashed #334155;">
             <h3 style="margin-bottom:12px; font-size:1.1rem; color:#cbd5e1;">OPML Import / Export</h3>
-            <div style="display:flex; align-items:center; flex-wrap:wrap; gap:12px; background:#0f172a; padding:14px; border-radius:6px; border:1px solid #334155;">
+            <div style="display:flex; align-items:center; flex-wrap:wrap; gap:12px; background:var(--bg-app); padding:14px; border-radius:6px; border:1px solid var(--border-color);">
               <div style="display:flex; flex-direction:column; gap:4px;">
                 <span style="font-size:0.8rem; font-weight:bold; color:#94a3b8;">Import OPML file:</span>
                 <input type="file" id="opmlFileInput" accept=".opml,.xml" style="font-size:0.85rem; min-height:auto; padding:4px; background:transparent; border:none; color:#94a3b8;" />
@@ -1510,6 +1517,27 @@ cat > app/static/index.html <<'FRONTENDHTML'
     el("starredOnly").addEventListener("change", e => { state.starredOnly = e.target.checked; loadItems(); });
 
     el("healthBtn").addEventListener("click", showHealth);
+
+    (function initTheme() {
+      const btn = el("themeToggleBtn");
+      const apply = (theme) => {
+        if (theme === "light") {
+          document.documentElement.setAttribute("data-theme", "light");
+          btn.textContent = "🌙";
+          btn.title = "Switch to dark mode";
+        } else {
+          document.documentElement.removeAttribute("data-theme");
+          btn.textContent = "☀️";
+          btn.title = "Switch to light mode";
+        }
+      };
+      apply(localStorage.getItem("lf-theme") || "dark");
+      btn.addEventListener("click", () => {
+        const next = document.documentElement.getAttribute("data-theme") === "light" ? "dark" : "light";
+        localStorage.setItem("lf-theme", next);
+        apply(next);
+      });
+    })();
     el("manageFeedsBtn").addEventListener("click", showManageFeeds);
 
     el("markReadBtn").addEventListener("click", async () => {
@@ -1668,14 +1696,26 @@ FRONTENDHTML
 # -----------------------------------------------------------------
 cat > app/static/styles.css <<'CUSTOMCSS'
 :root {
-  --primary: #3b82f6;
-  --primary-hover: #2563eb;
+  --primary: #1A5C63;
+  --primary-hover: #14474d;
   --bg-app: #0f172a;
   --bg-card: #1e293b;
   --border-color: #334155;
   --text-main: #f8fafc;
   --text-muted: #94a3b8;
   --radius: 8px;
+  --theme-toggle-icon: "☀️";
+  color-scheme: dark;
+}
+
+[data-theme="light"] {
+  --bg-app: #f1f5f9;
+  --bg-card: #ffffff;
+  --border-color: #e2e8f0;
+  --text-main: #0f172a;
+  --text-muted: #64748b;
+  --theme-toggle-icon: "🌙";
+  color-scheme: light;
 }
 
 * {
@@ -1749,7 +1789,21 @@ body {
   #search { grid-column: span 1; }
 }
 
-/* Core Target Area Parameters */
+.themeToggleBtn {
+  font-size: 1.1rem;
+  padding: 6px 10px !important;
+  min-width: 40px;
+  line-height: 1;
+}
+
+.controls input,
+.controls select,
+.filterDrawerRow select,
+#searchDrawer {
+  background: var(--bg-app) !important;
+  color: var(--text-main) !important;
+  border-color: var(--border-color) !important;
+}
 .controls input, 
 .controls select,
 .heroActions button,
@@ -1760,7 +1814,7 @@ button {
   padding: 10px 14px;
   border-radius: var(--radius);
   border: 1px solid var(--border-color);
-  background: #111827;
+  background: var(--bg-card);
   font-size: 16px; 
   color: var(--text-main);
   cursor: pointer;
@@ -1774,7 +1828,7 @@ button {
 button:hover { background: var(--primary-hover); }
 
 button.secondary {
-  background: #1e293b;
+  background: var(--bg-card);
   border: 1px solid var(--border-color);
 }
 button.secondary:hover { background: #334155; }
@@ -1898,10 +1952,10 @@ button.secondary:hover { background: #334155; }
 .starBtn { color: #eab308 !important; }
 
 /* Diagnostics System Sheet overrides */
-.healthPanel { padding: 16px; background: #1e293b; margin: 16px; border-radius: var(--radius); border: 1px solid var(--border-color); overflow-x: auto; }
+.healthPanel { padding: 16px; background: var(--bg-card); margin: 16px; border-radius: var(--radius); border: 1px solid var(--border-color); overflow-x: auto; }
 .healthTable { width: 100%; border-collapse: collapse; font-size: 0.9rem; color: #f8fafc; }
 .healthTable th, .healthTable td { padding: 12px; border-bottom: 1px solid #334155; }
-.healthTable th { background: #0f172a; }
+.healthTable th { background: var(--bg-app); }
 .errorText { color: #ef4444; font-size: 0.8rem; margin-top: 4px; font-family: monospace; }
 .badge { display: inline-block; padding: 2px 6px; font-size: 0.7rem; font-weight: 600; border-radius: 4px; }
 .badge-error { background: #7f1d1d; color: #fca5a5; }
@@ -1944,14 +1998,14 @@ button.secondary:hover { background: #334155; }
     background: transparent !important;
     color: var(--text-main) !important;
   }
-  .heroActions button:hover { background: #1e293b !important; }
+  .heroActions button:hover { background: var(--bg-card) !important; }
   .heroActions button#refreshBtn { color: var(--primary) !important; font-weight: 700; }
 }
 
 /* Modals Definition Framework */
 .modal { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.7); display: flex; align-items: center; justify-content: center; z-index: 2000; padding: 16px; }
-.modal-content { background: #1e293b; padding: 24px; border-radius: var(--radius); width: 100%; max-width: 500px; border: 1px solid var(--border-color); }
-.modal input { width: 100%; background: #0f172a; color:#fff; border: 1px solid var(--border-color); padding: 10px; border-radius: 6px; margin-top: 4px; }
+.modal-content { background: var(--bg-card); padding: 24px; border-radius: var(--radius); width: 100%; max-width: 500px; border: 1px solid var(--border-color); }
+.modal input { width: 100%; background: var(--bg-app); color: var(--text-main); border: 1px solid var(--border-color); padding: 10px; border-radius: 6px; margin-top: 4px; }
 /* Drawer: phone only (single-column breakpoint) */
 .filterToggleBtn { display: none; }
 
@@ -1963,7 +2017,7 @@ button.secondary:hover { background: #334155; }
     position: fixed;
     bottom: 0; left: 0; right: 0;
     z-index: 200;
-    background: #1e293b;
+    background: var(--bg-card);
     border-top: 2px solid #1A5C63;
     border-radius: 14px 14px 0 0;
     transform: translateY(100%);
@@ -1996,7 +2050,7 @@ button.secondary:hover { background: #334155; }
     padding: 10px 12px;
     border-radius: var(--radius);
     border: 1px solid var(--border-color);
-    background: #111827;
+    background: var(--bg-app);
     font-size: 16px;
     color: var(--text-main);
   }
