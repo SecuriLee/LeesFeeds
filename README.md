@@ -1,22 +1,51 @@
 # Lee's Feeds
-A docker-based RSS collector based on Tailscale, Caddy and other freely-available components
 
-A long, long time ago in a galaxy far, far away, I used Google Reader.
-Nothing since then has ticked the box - Flipboard maybe coming close but why do I have Australian stuff in there all the time?!!?
+A self-hosted RSS reader deployed as a single script into Docker, with private access via Tailscale and automatic TLS via Caddy.
 
-So Lee's Feeds is my creation; it's a one-script deploy into Docker using Tailscale to build a private network and have TLS.
+---
 
-It comes with some feeds that you might think are rubbish.  OK!  Just delete them.
-You can also create profiles (heck, it's a one-person application - no authentication!) and import/export OPML files there.
+A long, long time ago in a galaxy far, far away, I used Google Reader. Nothing since has ticked the box — Flipboard came close, but why is there so much Australian content in there?!
 
-Take bootstrap.sh, modify your Tailscale hostname into it and run it on a linux host.  It will search dependencies and install itself,
-all you need to do is point your browser at it.
+So I built Lee's Feeds. One script, one host, done.
 
-If you're running for the first time, go into the leesfeeds folder and
-docker  compose up -d --build
+It comes with some starter feeds you might think are rubbish. That's fine — delete them. You can create profiles, and import/export OPML files from the Manage Feeds panel.
 
-If you were running and upgraded, go into the leesfeed folder and 
+> ⚠️ No authentication — this is a single-user application, designed to run privately over Tailscale.
+
+## Requirements
+
+- A Linux host (VM or bare metal)
+- [Tailscale](https://tailscale.com) installed and authenticated
+- Docker and Docker Compose
+
+## Quick start
+
+1. Edit `bootstrap.sh` and set your Tailscale hostname
+2. Run it:
+
+```bash
+bash bootstrap.sh
+```
+
+3. Point your browser at your Tailscale hostname
+
+That's it.
+
+## First run
+
+```bash
+cd leesfeeds
+docker compose up -d --build
+```
+
+## Upgrading
+
+```bash
+cd leesfeeds
 docker compose down
 docker compose up -d --build
+```
 
-<img width="1017" height="643" alt="image" src="https://github.com/user-attachments/assets/05f87593-e831-496f-b1de-fd4132cac14d" />
+## Screenshot
+
+<img width="1017" alt="Lee's Feeds screenshot" src="https://github.com/user-attachments/assets/05f87593-e831-496f-b1de-fd4132cac14d" />
