@@ -915,11 +915,44 @@ cat > app/static/index.html <<'FRONTENDHTML'
       <p id="stats" class="muted" style="cursor:pointer; display:flex; gap:14px; align-items:center;" title="Click to view feed errors"></p>
     </div>
     <div class="heroActions">
-      <button id="themeToggleBtn" class="secondary themeToggleBtn" aria-label="Toggle light/dark mode" title="Toggle light/dark mode">☀️</button>
-      <button id="healthBtn" class="secondary">Feed health</button>
-      <button id="manageFeedsBtn" class="secondary">Manage feeds</button>
-      <button id="markReadBtn" class="secondary">Mark read</button>
-      <button id="refreshBtn">Refresh now</button>
+      <button id="themeToggleBtn" class="heroIconBtn secondary themeToggleBtn" aria-label="Toggle light/dark mode" title="Toggle theme">
+        <svg class="iconSun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="5"/>
+          <line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/>
+          <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+          <line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/>
+          <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+        </svg>
+        <svg class="iconMoon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+        </svg>
+      </button>
+      <button id="healthBtn" class="heroIconBtn secondary" aria-label="Feed health" title="Feed health">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+        </svg>
+      </button>
+      <button id="manageFeedsBtn" class="heroIconBtn secondary" aria-label="Manage feeds" title="Manage feeds">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/>
+          <line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/>
+          <line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/>
+          <line x1="1" y1="14" x2="7" y2="14"/>
+          <line x1="9" y1="8" x2="15" y2="8"/>
+          <line x1="17" y1="16" x2="23" y2="16"/>
+        </svg>
+      </button>
+      <button id="markReadBtn" class="heroIconBtn secondary" aria-label="Mark shown read" title="Mark shown read">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="20 6 9 17 4 12"/>
+        </svg>
+      </button>
+      <button id="refreshBtn" class="heroIconBtn" aria-label="Refresh feeds" title="Refresh feeds">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="23 4 23 10 17 10"/>
+          <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+        </svg>
+      </button>
     </div>
   </header>
 
@@ -1576,16 +1609,11 @@ cat > app/static/index.html <<'FRONTENDHTML'
     el("healthBtn").addEventListener("click", showHealth);
 
     (function initTheme() {
-      const btn = el("themeToggleBtn");
       const apply = (theme) => {
         if (theme === "light") {
           document.documentElement.setAttribute("data-theme", "light");
-          btn.textContent = "🌙";
-          btn.title = "Switch to dark mode";
         } else {
           document.documentElement.removeAttribute("data-theme");
-          btn.textContent = "☀️";
-          btn.title = "Switch to light mode";
         }
       };
       apply(localStorage.getItem("lf-theme") || "dark");
@@ -1594,7 +1622,7 @@ cat > app/static/index.html <<'FRONTENDHTML'
         localStorage.setItem("lf-theme", next);
         apply(next);
       };
-      btn.addEventListener("click", toggle);
+      el("themeToggleBtn").addEventListener("click", toggle);
       el("themeToggleBtnMobile").addEventListener("click", toggle);
     })();
 
@@ -1941,6 +1969,24 @@ body {
   main { padding-top: 0; }
 }
 /* ── End mobile bar ──────────────────────────────── */
+
+.heroIconBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border-radius: var(--radius);
+  flex-shrink: 0;
+}
+.heroIconBtn svg { width: 22px; height: 22px; }
+
+/* Desktop sun/moon visibility — mirrors mobile logic */
+.heroIconBtn .iconMoon { display: none; }
+.heroIconBtn .iconSun  { display: block; }
+[data-theme="light"] .heroIconBtn .iconMoon { display: block; }
+[data-theme="light"] .heroIconBtn .iconSun  { display: none; }
 
 .themeToggleBtn {
   font-size: 1.1rem;
