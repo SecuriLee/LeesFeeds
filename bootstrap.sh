@@ -899,6 +899,7 @@ cat > app/static/index.html <<'FRONTENDHTML'
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
   <title>Lee's Feeds</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='6' fill='%230f172a'/%3E%3Crect x='10' y='8' width='44' height='48' rx='3' fill='none' stroke='%231A5C63' stroke-width='3'/%3E%3Cpolyline points='42,8 54,8 54,20 42,20 42,8' fill='%230f172a' stroke='%231A5C63' stroke-width='2.5' stroke-linejoin='round'/%3E%3Crect x='16' y='24' width='28' height='4' rx='1.5' fill='%231A5C63'/%3E%3Crect x='16' y='32' width='22' height='2.5' rx='1' fill='%231A5C63' opacity='.6'/%3E%3Crect x='16' y='37' width='26' height='2.5' rx='1' fill='%231A5C63' opacity='.6'/%3E%3Crect x='16' y='42' width='18' height='2.5' rx='1' fill='%231A5C63' opacity='.6'/%3E%3C/svg%3E" />
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
@@ -937,6 +938,7 @@ cat > app/static/index.html <<'FRONTENDHTML'
     
     <p id="status" class="status"></p>
     <section id="grid" class="grid"></section>
+    <div id="toast" class="toast hidden"></div>
     <section id="healthPanel" class="healthPanel hidden"></section>
 
     <div id="editModal" class="modal hidden">
@@ -1502,12 +1504,38 @@ cat > app/static/index.html <<'FRONTENDHTML'
       } catch(e) { console.error(e); }
     });
 
+    function showToast(msg, durationMs = 3000) {
+      const t = el("toast");
+      t.textContent = msg;
+      t.classList.remove("hidden");
+      clearTimeout(showToast._timer);
+      showToast._timer = setTimeout(() => t.classList.add("hidden"), durationMs);
+    }
+
     el("refreshBtn").addEventListener("click", async () => {
-      el("refreshBtn").disabled = true;
+      const btn = el("refreshBtn");
+      if (btn.disabled) return;
+      btn.disabled = true;
       try {
         await api("/api/refresh", { method: "POST" });
-        setTimeout(() => { el("refreshBtn").disabled = false; initApplicationContext(); }, 2000);
-      } catch(e) { el("refreshBtn").disabled = false; }
+        const total = 15;
+        let remaining = total;
+        showToast(`Refreshing feeds… reloading in ${remaining}s`, (total + 1) * 1000);
+        const tick = setInterval(() => {
+          remaining--;
+          if (remaining <= 0) {
+            clearInterval(tick);
+            btn.disabled = false;
+            el("toast").classList.add("hidden");
+            if (state.mode === "stories") initApplicationContext();
+          } else {
+            showToast(`Refreshing feeds… reloading in ${remaining}s`, (remaining + 1) * 1000);
+          }
+        }, 1000);
+      } catch(e) {
+        showToast("Refresh failed.", 3000);
+        btn.disabled = false;
+      }
     });
 
     el("profileSelect").addEventListener("change", e => {
@@ -1808,6 +1836,14 @@ button.secondary:hover { background: #334155; }
 .modal-content { background: #1e293b; padding: 24px; border-radius: var(--radius); width: 100%; max-width: 500px; border: 1px solid var(--border-color); }
 .modal input { width: 100%; background: #0f172a; color:#fff; border: 1px solid var(--border-color); padding: 10px; border-radius: 6px; margin-top: 4px; }
 .status { font-size: 0.9rem; color: var(--text-muted); margin-bottom: 15px; padding: 0 16px; font-weight: 500; }
+.toast {
+  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+  background: #1A5C63; color: #f0fdfa; padding: 10px 20px; border-radius: 6px;
+  font-size: 0.9rem; font-weight: 500; z-index: 9999; white-space: nowrap;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  transition: opacity 0.3s ease;
+}
+.toast.hidden { display: none; }
 .hidden { display: none !important; }
 CUSTOMCSS
 
