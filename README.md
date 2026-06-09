@@ -20,14 +20,13 @@ It comes with some starter feeds you might think are rubbish. That's fine — de
 
 ## Quick start
 
-1. Edit `bootstrap.sh` and set your Tailscale hostname
-2. Run it:
+1. Run bootstrap.sh:
 
 ```bash
 bash bootstrap.sh
 ```
 
-3. Point your browser at your Tailscale hostname
+3. Point your browser at your Tailscale hostname (it should have detected it automagically)
 
 That's it.
 
