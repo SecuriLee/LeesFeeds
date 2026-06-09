@@ -1793,12 +1793,13 @@ button.secondary:hover { background: #334155; }
 .grid {
   display: grid;
   grid-template-columns: 1fr;
+  grid-auto-rows: 1fr;
   gap: 16px;
   padding: 16px;
+  align-items: stretch;
 }
 
-@media (min-width: 640px) { .grid { grid-template-columns: repeat(2, 1fr); } }
-@media (min-width: 1024px) { .grid { grid-template-columns: repeat(3, 1fr); } }
+@media (min-width: 640px) { .grid { grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); } }
 
 /* Unified Premium Card Design */
 .card {
@@ -1808,6 +1809,7 @@ button.secondary:hover { background: #334155; }
   border-radius: var(--radius);
   border: 1px solid var(--border-color);
   overflow: hidden;
+  height: 100%;
 }
 
 @media (max-width: 480px) {
@@ -1823,6 +1825,7 @@ button.secondary:hover { background: #334155; }
   height: 160px;
   object-fit: cover;
   display: block;
+  flex-shrink: 0;
 }
 
 .cardBody {
@@ -1830,6 +1833,7 @@ button.secondary:hover { background: #334155; }
   display: flex;
   flex-direction: column;
   flex: 1;
+  min-height: 0;
 }
 
 .cardMeta {
@@ -1840,6 +1844,7 @@ button.secondary:hover { background: #334155; }
   font-size: 0.75rem;
   color: var(--text-muted);
   margin-bottom: 8px;
+  flex-shrink: 0;
 }
 .categoryTag { background: #1e3a8a; color: #93c5fd; padding: 2px 6px; border-radius: 4px; font-weight: 600; }
 .feedTitleTag { color: #f1f5f9; font-weight: 600; }
@@ -1848,6 +1853,11 @@ button.secondary:hover { background: #334155; }
   font-size: 1.05rem;
   font-weight: 700;
   margin-bottom: 6px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  flex-shrink: 0;
 }
 .cardTitle a { color: var(--text-main); text-decoration: none; }
 .cardTitle a:hover { color: var(--primary); }
@@ -1856,6 +1866,11 @@ button.secondary:hover { background: #334155; }
   font-size: 0.88rem;
   color: var(--text-muted);
   margin-bottom: 12px;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  flex: 1;
 }
 
 /* Summary Action Icons Integration */
