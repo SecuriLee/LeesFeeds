@@ -899,7 +899,7 @@ cat > app/static/index.html <<'FRONTENDHTML'
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
   <title>Lee's Feeds</title>
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='6' fill='%230f172a'/%3E%3Crect x='10' y='8' width='44' height='48' rx='3' fill='none' stroke='%231A5C63' stroke-width='3'/%3E%3Cpolyline points='42,8 54,8 54,20 42,20 42,8' fill='%230f172a' stroke='%231A5C63' stroke-width='2.5' stroke-linejoin='round'/%3E%3Crect x='16' y='24' width='28' height='4' rx='1.5' fill='%231A5C63'/%3E%3Crect x='16' y='32' width='22' height='2.5' rx='1' fill='%231A5C63' opacity='.6'/%3E%3Crect x='16' y='37' width='26' height='2.5' rx='1' fill='%231A5C63' opacity='.6'/%3E%3Crect x='16' y='42' width='18' height='2.5' rx='1' fill='%231A5C63' opacity='.6'/%3E%3C/svg%3E" />
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='6' fill='%230f172a'/%3E%3Crect x='10' y='8' width='44' height='48' rx='3' fill='none' stroke='%23fbbf24' stroke-width='3'/%3E%3Cpolyline points='42,8 54,8 54,20 42,20 42,8' fill='%230f172a' stroke='%23fbbf24' stroke-width='2.5' stroke-linejoin='round'/%3E%3Crect x='16' y='24' width='28' height='4' rx='1.5' fill='%23fbbf24'/%3E%3Crect x='16' y='32' width='22' height='2.5' rx='1' fill='%23fbbf24' opacity='.6'/%3E%3Crect x='16' y='37' width='26' height='2.5' rx='1' fill='%23fbbf24' opacity='.6'/%3E%3Crect x='16' y='42' width='18' height='2.5' rx='1' fill='%23fbbf24' opacity='.6'/%3E%3C/svg%3E" />
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
@@ -909,11 +909,11 @@ cat > app/static/index.html <<'FRONTENDHTML'
       <p id="stats" class="muted" style="cursor:pointer; display:flex; gap:14px; align-items:center;" title="Click to view feed errors"></p>
     </div>
     <div class="heroActions">
-      <button id="digestBtn" class="secondary">Security digest</button>
       <button id="healthBtn" class="secondary">Feed health</button>
       <button id="manageFeedsBtn" class="secondary">Manage feeds</button>
-      <button id="markReadBtn" class="secondary">Mark shown read</button>
+      <button id="markReadBtn" class="secondary">Mark read</button>
       <button id="refreshBtn">Refresh now</button>
+      <button id="filterToggleBtn" class="secondary filterToggleBtn" aria-label="Filters" aria-expanded="false">&#9776; Filters</button>
     </div>
   </header>
 
@@ -935,9 +935,28 @@ cat > app/static/index.html <<'FRONTENDHTML'
         <span>Starred only</span>
       </label>
     </section>
+
+    <div id="filterDrawer" class="filterDrawer" hidden>
+      <div class="filterDrawerInner">
+        <div class="filterDrawerHandle"></div>
+        <div class="filterDrawerRow">
+          <select id="profileSelectDrawer"></select>
+          <select id="categoryDrawer"><option value="">All categories</option></select>
+        </div>
+        <div class="filterDrawerRow">
+          <select id="feedDrawer"><option value="">All feeds</option></select>
+        </div>
+        <input id="searchDrawer" type="search" placeholder="Search…" autocomplete="off" style="width:100%; box-sizing:border-box;" />
+        <div class="filterDrawerChecks">
+          <label class="toggle"><input id="unreadOnlyDrawer" type="checkbox" checked /><span>Unread only</span></label>
+          <label class="toggle"><input id="starredOnlyDrawer" type="checkbox" /><span>Starred only</span></label>
+        </div>
+      </div>
+    </div>
     
     <p id="status" class="status"></p>
     <section id="grid" class="grid"></section>
+    <div id="filterDrawerOverlay"></div>
     <div id="toast" class="toast hidden"></div>
     <section id="healthPanel" class="healthPanel hidden"></section>
 
@@ -967,7 +986,6 @@ cat > app/static/index.html <<'FRONTENDHTML'
       q: "",
       unreadOnly: true,
       starredOnly: false,
-      securityDigest: false,
       offset: 0,
       limit: 30,
       hasMore: true,
@@ -1023,7 +1041,7 @@ cat > app/static/index.html <<'FRONTENDHTML'
     function updateStats() {
       if (!state.meta) return;
       const m = state.meta;
-      const filterLabel = state.securityDigest ? " · security digest" : state.category ? ` · ${state.category}` : "";
+      const filterLabel = state.category ? ` · ${state.category}` : "";
       el("stats").innerHTML = `
         <span title="${m.feed_count} feeds">📡 ${m.feed_count}</span>
         <span title="${m.item_count} stories">📖 ${m.item_count}</span>
@@ -1072,6 +1090,8 @@ cat > app/static/index.html <<'FRONTENDHTML'
       el("grid").classList.remove("hidden");
       el("healthPanel").classList.add("hidden");
       document.querySelector(".controls").classList.remove("hidden");
+      el("filterToggleBtn").classList.remove("hidden");
+      el("filterDrawer").setAttribute("hidden", "");
       window.scrollTo(0, 0);
 
       const p = new URLSearchParams();
@@ -1081,7 +1101,6 @@ cat > app/static/index.html <<'FRONTENDHTML'
       if (state.q) p.set("q", state.q);
       if (state.unreadOnly) p.set("unread", "true");
       if (state.starredOnly) p.set("starred", "true");
-      if (state.securityDigest) p.set("security_digest", "true");
       p.set("limit", state.limit.toString());
       p.set("offset", state.offset.toString());
 
@@ -1111,7 +1130,6 @@ cat > app/static/index.html <<'FRONTENDHTML'
       if (state.q) p.set("q", state.q);
       if (state.unreadOnly) p.set("unread", "true");
       if (state.starredOnly) p.set("starred", "true");
-      if (state.securityDigest) p.set("security_digest", "true");
       p.set("limit", state.limit.toString());
       p.set("offset", state.offset.toString());
 
@@ -1216,6 +1234,9 @@ cat > app/static/index.html <<'FRONTENDHTML'
       state.mode = "health";
       el("grid").classList.add("hidden");
       document.querySelector(".controls").classList.add("hidden");
+      closeDrawer();
+      el("filterDrawer").setAttribute("hidden", "");
+      el("filterToggleBtn").classList.add("hidden");
       const panel = el("healthPanel");
       panel.classList.remove("hidden");
       panel.innerHTML = "Loading parameters…";
@@ -1326,6 +1347,9 @@ cat > app/static/index.html <<'FRONTENDHTML'
       state.mode = "manage";
       el("grid").classList.add("hidden");
       document.querySelector(".controls").classList.add("hidden");
+      closeDrawer();
+      el("filterDrawer").setAttribute("hidden", "");
+      el("filterToggleBtn").classList.add("hidden");
       const panel = el("healthPanel");
       panel.classList.remove("hidden");
 
@@ -1451,7 +1475,7 @@ cat > app/static/index.html <<'FRONTENDHTML'
     }
 
     el("homeBtn").addEventListener("click", () => {
-      state.category = ""; state.feedId = ""; state.q = ""; state.securityDigest = false;
+      state.category = ""; state.feedId = ""; state.q = "";
       el("category").value = ""; el("feed").value = ""; el("search").value = "";
       state.mode = "stories";
       initApplicationContext();
@@ -1485,11 +1509,6 @@ cat > app/static/index.html <<'FRONTENDHTML'
     el("unreadOnly").addEventListener("change", e => { state.unreadOnly = e.target.checked; loadItems(); });
     el("starredOnly").addEventListener("change", e => { state.starredOnly = e.target.checked; loadItems(); });
 
-    el("digestBtn").addEventListener("click", () => {
-      state.securityDigest = true; state.category = ""; state.feedId = "";
-      el("category").value = ""; el("feed").value = "";
-      loadItems();
-    });
     el("healthBtn").addEventListener("click", showHealth);
     el("manageFeedsBtn").addEventListener("click", showManageFeeds);
 
@@ -1543,6 +1562,89 @@ cat > app/static/index.html <<'FRONTENDHTML'
       state.category = ""; state.feedId = "";
       initApplicationContext();
     });
+
+    // ----- Filter Drawer (phone) -----
+    function openDrawer() {
+      el("filterDrawer").removeAttribute("hidden");
+      el("filterDrawer").classList.add("open");
+      el("filterDrawerOverlay").classList.add("open");
+      el("filterToggleBtn").setAttribute("aria-expanded", "true");
+    }
+    function closeDrawer() {
+      el("filterDrawer").classList.remove("open");
+      el("filterDrawerOverlay").classList.remove("open");
+      el("filterToggleBtn").setAttribute("aria-expanded", "false");
+    }
+    el("filterToggleBtn").addEventListener("click", () => {
+      el("filterDrawer").hasAttribute("hidden")
+        ? (el("filterDrawer").removeAttribute("hidden"), requestAnimationFrame(() => openDrawer()))
+        : (el("filterDrawer").classList.contains("open") ? closeDrawer() : openDrawer());
+    });
+    el("filterDrawerOverlay").addEventListener("click", closeDrawer);
+
+    function syncDrawerToState() {
+      el("profileSelectDrawer").value = state.currentProfileId;
+      el("categoryDrawer").value = state.category;
+      el("feedDrawer").value = state.feedId;
+      el("searchDrawer").value = state.q;
+      el("unreadOnlyDrawer").checked = state.unreadOnly;
+      el("starredOnlyDrawer").checked = state.starredOnly;
+      const active = state.category || state.feedId || state.q || state.starredOnly || !state.unreadOnly;
+      el("filterToggleBtn").classList.toggle("filterActiveDot", !!active);
+    }
+
+    function syncDrawerOptions() {
+      ["categoryDrawer", "feedDrawer", "profileSelectDrawer"].forEach(drawerId => {
+        const srcId = drawerId.replace("Drawer", "").replace("profileSelectDrawer","profileSelect");
+        const src = el(srcId === "profileSelectDrawer" ? "profileSelect" : srcId);
+        if (!src) return;
+        const dst = el(drawerId);
+        dst.innerHTML = src.innerHTML;
+      });
+      syncDrawerToState();
+    }
+
+    el("profileSelectDrawer").addEventListener("change", e => {
+      state.currentProfileId = Number(e.target.value);
+      state.category = ""; state.feedId = "";
+      closeDrawer();
+      initApplicationContext();
+    });
+    el("categoryDrawer").addEventListener("change", e => {
+      state.category = e.target.value; state.feedId = "";
+      el("category").value = state.category;
+      loadItems(); syncDrawerToState(); closeDrawer();
+    });
+    el("feedDrawer").addEventListener("change", e => {
+      state.feedId = e.target.value;
+      el("feed").value = state.feedId;
+      loadItems(); syncDrawerToState(); closeDrawer();
+    });
+    let drawerSearchTimer;
+    el("searchDrawer").addEventListener("input", e => {
+      clearTimeout(drawerSearchTimer);
+      drawerSearchTimer = setTimeout(() => {
+        state.q = e.target.value;
+        el("search").value = state.q;
+        loadItems(); syncDrawerToState();
+      }, 350);
+    });
+    el("unreadOnlyDrawer").addEventListener("change", e => {
+      state.unreadOnly = e.target.checked;
+      el("unreadOnly").checked = state.unreadOnly;
+      loadItems(); syncDrawerToState();
+    });
+    el("starredOnlyDrawer").addEventListener("change", e => {
+      state.starredOnly = e.target.checked;
+      el("starredOnly").checked = state.starredOnly;
+      loadItems(); syncDrawerToState();
+    });
+
+    const _origLoadFeeds = loadFeeds;
+    loadFeeds = async function() {
+      await _origLoadFeeds();
+      syncDrawerOptions();
+    };
 
     el("modalCancelBtn").addEventListener("click", closeModal);
 
@@ -1835,6 +1937,84 @@ button.secondary:hover { background: #334155; }
 .modal { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.7); display: flex; align-items: center; justify-content: center; z-index: 2000; padding: 16px; }
 .modal-content { background: #1e293b; padding: 24px; border-radius: var(--radius); width: 100%; max-width: 500px; border: 1px solid var(--border-color); }
 .modal input { width: 100%; background: #0f172a; color:#fff; border: 1px solid var(--border-color); padding: 10px; border-radius: 6px; margin-top: 4px; }
+/* Drawer: phone only (single-column breakpoint) */
+.filterToggleBtn { display: none; }
+
+@media (max-width: 767px) {
+  .controls { display: none !important; }
+  .filterToggleBtn { display: inline-flex !important; align-items: center; gap: 6px; }
+
+  .filterDrawer {
+    position: fixed;
+    bottom: 0; left: 0; right: 0;
+    z-index: 200;
+    background: #1e293b;
+    border-top: 2px solid #1A5C63;
+    border-radius: 14px 14px 0 0;
+    transform: translateY(100%);
+    transition: transform 0.28s cubic-bezier(0.32, 0.72, 0, 1);
+    max-height: 80vh;
+    overflow-y: auto;
+  }
+  .filterDrawer.open {
+    transform: translateY(0);
+  }
+  .filterDrawerInner {
+    padding: 12px 16px 32px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .filterDrawerHandle {
+    width: 36px; height: 4px;
+    background: #475569;
+    border-radius: 2px;
+    margin: 0 auto 4px;
+  }
+  .filterDrawerRow {
+    display: flex;
+    gap: 10px;
+  }
+  .filterDrawerRow select {
+    flex: 1;
+    min-height: 44px;
+    padding: 10px 12px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border-color);
+    background: #111827;
+    font-size: 16px;
+    color: var(--text-main);
+  }
+  .filterDrawerChecks {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  #filterDrawerOverlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 199;
+    background: rgba(0,0,0,0.45);
+  }
+  #filterDrawerOverlay.open { display: block; }
+
+  .filterActiveDot::after {
+    content: '';
+    display: inline-block;
+    width: 7px; height: 7px;
+    background: #1A5C63;
+    border-radius: 50%;
+    margin-left: 5px;
+    vertical-align: middle;
+  }
+}
+
+@media (min-width: 768px) {
+  .filterDrawer { display: none !important; }
+  #filterDrawerOverlay { display: none !important; }
+}
+
 .status { font-size: 0.9rem; color: var(--text-muted); margin-bottom: 15px; padding: 0 16px; font-weight: 500; }
 .toast {
   position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
