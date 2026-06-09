@@ -920,9 +920,44 @@ cat > app/static/index.html <<'FRONTENDHTML'
       <button id="manageFeedsBtn" class="secondary">Manage feeds</button>
       <button id="markReadBtn" class="secondary">Mark read</button>
       <button id="refreshBtn">Refresh now</button>
-      <button id="filterToggleBtn" class="secondary filterToggleBtn" aria-label="Filters" aria-expanded="false">&#9776; Filters</button>
     </div>
   </header>
+
+  <nav class="mobileBar" aria-label="Mobile actions">
+    <button class="mobileBarBrand mobileBarTitle" id="homeBtnMobile" aria-label="Home">Lee's Feeds</button>
+    <button id="statsMobile" class="mobileBarStats" aria-label="Feed stats"></button>
+    <span class="mobileBarSpacer"></span>
+    <button id="themeToggleBtnMobile" class="mobileBarBtn" aria-label="Toggle theme">
+      <svg class="iconSun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="5"/>
+        <line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/>
+        <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+        <line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/>
+        <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+      </svg>
+      <svg class="iconMoon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+      </svg>
+    </button>
+    <button id="markReadBtnMobile" class="mobileBarBtn" aria-label="Mark shown read">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="20 6 9 17 4 12"/>
+      </svg>
+    </button>
+    <button id="refreshBtnMobile" class="mobileBarBtn" aria-label="Refresh feeds">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="23 4 23 10 17 10"/>
+        <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+      </svg>
+    </button>
+    <button id="filterToggleBtnMobile" class="mobileBarBtn" aria-label="Filters" aria-expanded="false">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="3" y1="7" x2="21" y2="7"/>
+        <line x1="3" y1="12" x2="21" y2="12"/>
+        <line x1="3" y1="17" x2="21" y2="17"/>
+      </svg>
+    </button>
+  </nav>
 
   <main>
     <section class="controls">
@@ -941,6 +976,7 @@ cat > app/static/index.html <<'FRONTENDHTML'
         <input id="starredOnly" type="checkbox" />
         <span>Starred only</span>
       </label>
+      <button id="filterToggleBtn" class="filterToggleBtn secondary" aria-expanded="false" aria-label="Filters">Filters</button>
     </section>
 
     <div id="filterDrawer" class="filterDrawer" hidden>
@@ -953,7 +989,7 @@ cat > app/static/index.html <<'FRONTENDHTML'
         <div class="filterDrawerRow">
           <select id="feedDrawer"><option value="">All feeds</option></select>
         </div>
-        <input id="searchDrawer" type="search" placeholder="Search…" autocomplete="off" style="width:100%; box-sizing:border-box;" />
+        <input id="searchDrawer" type="search" placeholder="Search…" autocomplete="off" style="width:100%; box-sizing:border-box; min-height:44px; padding:10px 12px; border-radius:var(--radius); border:1px solid var(--border-color); background:var(--bg-app); font-size:16px; color:var(--text-main);" />
         <div class="filterDrawerChecks">
           <label class="toggle"><input id="unreadOnlyDrawer" type="checkbox" checked /><span>Unread only</span></label>
           <label class="toggle"><input id="starredOnlyDrawer" type="checkbox" /><span>Starred only</span></label>
@@ -1057,6 +1093,8 @@ cat > app/static/index.html <<'FRONTENDHTML'
         ${m.error_count ? `<span title="${m.error_count} errors" style="color:var(--text-main); font-weight:bold;">⚠️ ${m.error_count}</span>` : ""}
         <span style="font-style:italic; color:#94a3b8;">${filterLabel}</span>
       `;
+      const mob = el("statsMobile");
+      if (mob) mob.textContent = `✉️ ${m.unread_count}${m.error_count ? `  ⚠️${m.error_count}` : ""}`;
     }
 
     function updateStatusLabel() {
@@ -1153,6 +1191,23 @@ cat > app/static/index.html <<'FRONTENDHTML'
       state.loadingMore = false;
     }
 
+    function feedInitial(feedTitle) {
+      if (!feedTitle) return "?";
+      const words = feedTitle.trim().split(/\s+/);
+      return words.length >= 2
+        ? (words[0][0] + words[1][0]).toUpperCase()
+        : feedTitle.slice(0, 2).toUpperCase();
+    }
+
+    function feedPlaceholderColour(feedTitle) {
+      let hash = 0;
+      for (let i = 0; i < (feedTitle || "").length; i++) {
+        hash = (hash * 31 + feedTitle.charCodeAt(i)) & 0xffffffff;
+      }
+      const hue = Math.abs(hash) % 360;
+      return `hsl(${hue}, 28%, 22%)`;
+    }
+
     function renderItems(chunk) {
       const grid = el("grid");
       chunk.forEach(item => {
@@ -1160,7 +1215,9 @@ cat > app/static/index.html <<'FRONTENDHTML'
         card.className = `card ${item.is_read ? 'read' : 'unread'}`;
         let imgHtml = "";
         if (item.image_url) {
-          imgHtml = `<div class="cardImage"><img src="${esc(item.image_url)}" alt="" loading="lazy" /></div>`;
+          imgHtml = `<div class="cardImage"><img src="${esc(item.image_url)}" alt="" loading="lazy" onerror="this.closest('.cardImage').replaceWith(Object.assign(document.createElement('div'), {className:'cardImagePlaceholder', style:'background:${feedPlaceholderColour(item.feed_title)}', innerHTML:'<span>${feedInitial(item.feed_title)}</span>'}))"/></div>`;
+        } else {
+          imgHtml = `<div class="cardImagePlaceholder" style="background:${feedPlaceholderColour(item.feed_title)}"><span>${feedInitial(item.feed_title)}</span></div>`;
         }
         card.innerHTML = `
           ${imgHtml}
@@ -1532,12 +1589,28 @@ cat > app/static/index.html <<'FRONTENDHTML'
         }
       };
       apply(localStorage.getItem("lf-theme") || "dark");
-      btn.addEventListener("click", () => {
+      const toggle = () => {
         const next = document.documentElement.getAttribute("data-theme") === "light" ? "dark" : "light";
         localStorage.setItem("lf-theme", next);
         apply(next);
-      });
+      };
+      btn.addEventListener("click", toggle);
+      el("themeToggleBtnMobile").addEventListener("click", toggle);
     })();
+
+    // Mobile bar wiring
+    el("homeBtnMobile").addEventListener("click", () => {
+      state.category = ""; state.feedId = ""; state.q = ""; state.securityDigest = false;
+      el("category").value = ""; el("feed").value = ""; el("search").value = "";
+      state.mode = "stories";
+      initApplicationContext();
+    });
+    el("statsMobile").addEventListener("click", () => {
+      if (state.meta && state.meta.error_count > 0) showHealth();
+    });
+    el("markReadBtnMobile").addEventListener("click", () => el("markReadBtn").click());
+    el("refreshBtnMobile").addEventListener("click", () => el("refreshBtn").click());
+    el("filterToggleBtnMobile").addEventListener("click", () => el("filterToggleBtn").click());
     el("manageFeedsBtn").addEventListener("click", showManageFeeds);
 
     el("markReadBtn").addEventListener("click", async () => {
@@ -1619,6 +1692,8 @@ cat > app/static/index.html <<'FRONTENDHTML'
       el("starredOnlyDrawer").checked = state.starredOnly;
       const active = state.category || state.feedId || state.q || state.starredOnly || !state.unreadOnly;
       el("filterToggleBtn").classList.toggle("filterActiveDot", !!active);
+      const mob = el("filterToggleBtnMobile");
+      if (mob) mob.classList.toggle("active", !!active);
     }
 
     function syncDrawerOptions() {
@@ -1789,6 +1864,84 @@ body {
   #search { grid-column: span 1; }
 }
 
+/* ── Mobile sticky bar ───────────────────────────── */
+.mobileBar { display: none; }
+
+@media (max-width: 767px) {
+  .hero .heroTitle { display: none; }
+  .hero .heroActions { display: none; }
+  .hero { padding: 0; min-height: 0; border-bottom: none; }
+
+  .mobileBar {
+    display: flex;
+    align-items: center;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    background: var(--bg-card);
+    border-bottom: 1px solid var(--border-color);
+    padding: 0 8px;
+    height: 52px;
+    gap: 2px;
+  }
+
+  .mobileBarBrand {
+    all: unset;
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    padding: 0 4px 0 8px;
+    height: 44px;
+    color: var(--primary);
+    cursor: pointer;
+    flex-shrink: 0;
+    font-size: 1.05rem;
+    font-weight: 800;
+    letter-spacing: -0.01em;
+    white-space: nowrap;
+  }
+
+  .mobileBarStats {
+    all: unset;
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    cursor: pointer;
+    padding: 0 4px;
+    white-space: nowrap;
+  }
+
+  .mobileBarSpacer { flex: 1; }
+
+  .mobileBarBtn {
+    all: unset;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    color: var(--text-muted);
+    cursor: pointer;
+    border-radius: var(--radius);
+    flex-shrink: 0;
+    transition: color 0.15s, background 0.15s;
+  }
+  .mobileBarBtn:active { background: var(--border-color); color: var(--text-main); }
+  .mobileBarBtn svg { width: 22px; height: 22px; }
+  .mobileBarBtn.active { color: var(--primary); }
+
+  /* sun shown in dark mode (click → light), moon shown in light mode (click → dark) */
+  .iconMoon { display: none; }
+  .iconSun  { display: block; }
+  [data-theme="light"] .iconMoon { display: block; }
+  [data-theme="light"] .iconSun  { display: none; }
+
+  main { padding-top: 0; }
+}
+/* ── End mobile bar ──────────────────────────────── */
+
 .themeToggleBtn {
   font-size: 1.1rem;
   padding: 6px 10px !important;
@@ -1882,6 +2035,24 @@ button.secondary:hover { background: #334155; }
   flex-shrink: 0;
 }
 
+.cardImagePlaceholder {
+  width: 100%;
+  height: 160px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.cardImagePlaceholder span {
+  font-size: 2.4rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: rgba(255,255,255,0.18);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
 .cardBody {
   padding: 14px;
   display: flex;
@@ -1961,46 +2132,7 @@ button.secondary:hover { background: #334155; }
 .badge-error { background: #7f1d1d; color: #fca5a5; }
 .badge-healthy { background: #14532d; color: #86efac; }
 
-/* 6. Mobile Rigid Persistent Top Navigation Placement Overhaul */
-@media (max-width: 767px) {
-  body {
-    padding-top: 64px; /* Gives room for the top persistent menu fixed element overlay */
-  }
 
-  .heroActions {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    background: rgba(15, 23, 42, 0.93);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-    border-bottom: 1px solid var(--border-color);
-    border-top: none;
-    display: grid;
-    grid-template-columns: repeat(5, 1fr);
-    padding: 6px;
-    gap: 2px;
-    z-index: 1000;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-  }
-  
-  .heroActions button {
-    font-size: 10px !important;
-    padding: 2px !important;
-    min-height: auto;
-    height: 48px;
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    align-items: center;
-    border: none !important;
-    background: transparent !important;
-    color: var(--text-main) !important;
-  }
-  .heroActions button:hover { background: var(--bg-card) !important; }
-  .heroActions button#refreshBtn { color: var(--primary) !important; font-weight: 700; }
-}
 
 /* Modals Definition Framework */
 .modal { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.7); display: flex; align-items: center; justify-content: center; z-index: 2000; padding: 16px; }
@@ -2100,4 +2232,3 @@ CUSTOMCSS
 # Deployment Execution Framework
 # -----------------------------------------------------------------
 echo "Deployment structure compiled successfully."
-
