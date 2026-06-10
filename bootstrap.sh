@@ -571,7 +571,11 @@ def refresh_one_feed(feed) -> int:
     count  = 0
 
     if parsed.bozo and getattr(parsed, "bozo_exception", None):
-        error = str(parsed.bozo_exception)[:500]
+        exc = parsed.bozo_exception
+        # CharacterEncodingOverride / CharacterEncodingUnknown are cosmetic —
+        # feedparser still parses the feed correctly, so don't surface as an error
+        if type(exc).__name__ not in ("CharacterEncodingOverride", "CharacterEncodingUnknown"):
+            error = str(exc)[:500]
 
     with db() as conn:
         for entry in parsed.entries[:MAX_ITEMS_PER_FEED]:
