@@ -574,7 +574,7 @@ def refresh_one_feed(feed) -> int:
         exc = parsed.bozo_exception
         # CharacterEncodingOverride / CharacterEncodingUnknown are cosmetic —
         # feedparser still parses the feed correctly, so don't surface as an error
-        if type(exc).__name__ not in ("CharacterEncodingOverride", "CharacterEncodingUnknown"):
+        if type(exc).__name__ not in ("CharacterEncodingOverride", "CharacterEncodingUnknown", "NonXMLContentType"):
             error = str(exc)[:500]
 
     with db() as conn:
