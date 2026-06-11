@@ -320,15 +320,27 @@ cat > scripts/prune_db.sh << 'PRUNEEOF'
 #!/usr/bin/env bash
 set -euo pipefail
 DB="${PROJECT_DIR}/data/opml_reader.sqlite3"
-DAYS=90
+DEFAULT_DAYS=90
+# Per-feed max_age_days pruning (uses fetched_at, not published)
 sqlite3 "${DB}" "
   DELETE FROM items
   WHERE is_read    = 1
     AND is_starred = 0
-    AND published  < datetime('now', '-${DAYS} days');
+    AND feed_id IN (SELECT id FROM feeds WHERE max_age_days IS NOT NULL AND max_age_days > 0)
+    AND fetched_at < datetime('now', '-' || (
+          SELECT max_age_days FROM feeds WHERE id = items.feed_id
+        ) || ' days');
+"
+# Global fallback for feeds with no max_age_days set
+sqlite3 "${DB}" "
+  DELETE FROM items
+  WHERE is_read    = 1
+    AND is_starred = 0
+    AND fetched_at < datetime('now', '-${DEFAULT_DAYS} days')
+    AND feed_id IN (SELECT id FROM feeds WHERE max_age_days IS NULL OR max_age_days = 0);
 "
 sqlite3 "${DB}" "VACUUM;"
-echo "$(date -u +%FT%TZ) pruned items older than ${DAYS} days. DB: $(du -sh ${DB} | cut -f1)"
+echo "$(date -u +%FT%TZ) pruned items older than per-feed max_age_days (default ${DEFAULT_DAYS}d). DB: $(du -sh ${DB} | cut -f1)"
 PRUNEEOF
 chmod +x scripts/prune_db.sh
 
@@ -395,6 +407,8 @@ class FeedEdit(BaseModel):
     category: str
     xml_url: str
     html_url: Optional[str] = ""
+    max_volume: Optional[int] = None
+    max_age_days: Optional[int] = None
 
 class EntryEdit(BaseModel):
     title: str
@@ -408,6 +422,8 @@ class FeedCreate(BaseModel):
     category: str
     xml_url: str
     html_url: Optional[str] = ""
+    max_volume: Optional[int] = None
+    max_age_days: Optional[int] = None
 
 # -----------------------------------------------------------------
 # DB helpers
@@ -443,14 +459,18 @@ def init_db():
                 name TEXT NOT NULL UNIQUE
             );
             CREATE TABLE IF NOT EXISTS feeds (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                profile_id   INTEGER NOT NULL DEFAULT 1,
-                title        TEXT NOT NULL,
-                category     TEXT NOT NULL,
-                xml_url      TEXT NOT NULL,
-                html_url     TEXT,
-                last_checked TEXT,
-                last_error   TEXT,
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                profile_id    INTEGER NOT NULL DEFAULT 1,
+                title         TEXT NOT NULL,
+                category      TEXT NOT NULL,
+                xml_url       TEXT NOT NULL,
+                html_url      TEXT,
+                last_checked  TEXT,
+                last_error    TEXT,
+                etag          TEXT,
+                last_modified TEXT,
+                max_volume    INTEGER,
+                max_age_days  INTEGER,
                 FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE,
                 UNIQUE(profile_id, xml_url)
             );
@@ -475,9 +495,21 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_items_feed      ON items(feed_id);
             CREATE INDEX IF NOT EXISTS idx_items_read      ON items(is_read);
             CREATE INDEX IF NOT EXISTS idx_items_starred   ON items(is_starred);
+            CREATE INDEX IF NOT EXISTS idx_items_fetched    ON items(fetched_at);
             CREATE INDEX IF NOT EXISTS idx_feeds_category  ON feeds(category);
             CREATE INDEX IF NOT EXISTS idx_feeds_profile   ON feeds(profile_id);
         """)
+        # Migrations for existing databases
+        for col, defn in [
+            ("etag",          "TEXT"),
+            ("last_modified", "TEXT"),
+            ("max_volume",    "INTEGER"),
+            ("max_age_days",  "INTEGER"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE feeds ADD COLUMN {col} {defn}")
+            except sqlite3.OperationalError:
+                pass  # column already exists
         conn.execute("INSERT OR IGNORE INTO profiles (id, name) VALUES (1, 'Default')")
 
 def seed_default_profile():
@@ -565,20 +597,47 @@ def extract_image(entry, link: str) -> Optional[str]:
     return None
 
 def refresh_one_feed(feed) -> int:
-    parsed = feedparser.parse(feed["xml_url"])
+    kwargs = {}
+    if feed["etag"]:          kwargs["etag"]          = feed["etag"]
+    if feed["last_modified"]: kwargs["modified"]       = feed["last_modified"]
+
+    parsed = feedparser.parse(feed["xml_url"], **kwargs)
     now    = utc_now()
     error  = None
     count  = 0
 
+    # 304 Not Modified — nothing to do, just update last_checked
+    if getattr(parsed, "status", None) == 304:
+        with db() as conn:
+            conn.execute("UPDATE feeds SET last_checked = ? WHERE id = ?", (now, feed["id"]))
+        return 0
+
     if parsed.bozo and getattr(parsed, "bozo_exception", None):
         exc = parsed.bozo_exception
-        # CharacterEncodingOverride / CharacterEncodingUnknown are cosmetic —
-        # feedparser still parses the feed correctly, so don't surface as an error
-        if type(exc).__name__ not in ("CharacterEncodingOverride", "CharacterEncodingUnknown", "NonXMLContentType"):
+        exc_name = type(exc).__name__
+        # These are all non-fatal feedparser warnings where parsing still succeeds:
+        # CharacterEncodingOverride  — declared charset != actual encoding
+        # CharacterEncodingUnknown   — no charset declared, feedparser guessed
+        # NonXMLContentType          — served as text/html or similar, but parseable
+        # UndeclaredNamespace        — XML namespace not declared, feedparser still parses
+        # ThingsNobodyCaresAbout     — feedparser internal non-fatal marker
+        NON_FATAL = {
+            "CharacterEncodingOverride",
+            "CharacterEncodingUnknown",
+            "NonXMLContentType",
+            "UndeclaredNamespace",
+            "ThingsNobodyCaresAbout",
+        }
+        if exc_name not in NON_FATAL:
             error = str(exc)[:500]
 
+    new_etag          = getattr(parsed, "etag",     None) or feed["etag"]
+    new_last_modified = getattr(parsed, "modified", None) or feed["last_modified"]
+
+    volume = feed["max_volume"] or MAX_ITEMS_PER_FEED
+
     with db() as conn:
-        for entry in parsed.entries[:MAX_ITEMS_PER_FEED]:
+        for entry in parsed.entries[:volume]:
             title     = clean_text(getattr(entry, "title", "Untitled story"), 300)
             link      = getattr(entry, "link", "") or feed["html_url"] or ""
             teaser    = clean_text(entry_summary(entry), 420)
@@ -597,7 +656,10 @@ def refresh_one_feed(feed) -> int:
             except sqlite3.IntegrityError:
                 pass
 
-        conn.execute("UPDATE feeds SET last_checked = ?, last_error = ? WHERE id = ?", (now, error, feed["id"]))
+        conn.execute(
+            "UPDATE feeds SET last_checked = ?, last_error = ?, etag = ?, last_modified = ? WHERE id = ?",
+            (now, error, new_etag, new_last_modified, feed["id"])
+        )
     return count
 
 def refresh_all_feeds():
@@ -677,9 +739,9 @@ def add_feed(f: FeedCreate, profile_id: int = 1):
     try:
         with db() as conn:
             cur = conn.execute("""
-                INSERT INTO feeds (profile_id, title, category, xml_url, html_url)
-                VALUES (?, ?, ?, ?, ?)
-            """, (profile_id, f.title, f.category, f.xml_url, f.html_url))
+                INSERT INTO feeds (profile_id, title, category, xml_url, html_url, max_volume, max_age_days)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (profile_id, f.title, f.category, f.xml_url, f.html_url, f.max_volume, f.max_age_days))
             return {"id": cur.lastrowid}
     except sqlite3.IntegrityError:
         raise HTTPException(400, "Feed tracking conflict.")
@@ -688,9 +750,10 @@ def add_feed(f: FeedCreate, profile_id: int = 1):
 def edit_feed(feed_id: int, f: FeedEdit):
     with db() as conn:
         cur = conn.execute("""
-            UPDATE feeds SET title = ?, category = ?, xml_url = ?, html_url = ?
+            UPDATE feeds SET title = ?, category = ?, xml_url = ?, html_url = ?,
+                             max_volume = ?, max_age_days = ?
             WHERE id = ?
-        """, (f.title, f.category, f.xml_url, f.html_url, feed_id))
+        """, (f.title, f.category, f.xml_url, f.html_url, f.max_volume, f.max_age_days, feed_id))
         if cur.rowcount == 0: raise HTTPException(404, "Feed stream not found.")
     return {"status": "updated"}
 
@@ -705,13 +768,14 @@ def health(profile_id: int = 1):
     with db() as conn:
         rows = conn.execute("""
             SELECT f.id, f.title, f.category, f.xml_url, f.html_url, f.last_checked, f.last_error,
+                   f.max_volume, f.max_age_days,
                    COUNT(i.id) AS item_count, SUM(CASE WHEN i.is_read = 0 THEN 1 ELSE 0 END) AS unread_count,
                    MAX(i.fetched_at) AS last_item_fetched_at
             FROM feeds f
             LEFT JOIN items i ON i.feed_id = f.id
             WHERE f.profile_id = ?
             GROUP BY f.id
-            ORDER BY CASE WHEN f.last_error IS NOT NULL AND f.last_error != '' THEN 0 WHEN f.last_checked IS NULL THEN 1 ELSE 2 END, f.category, f.title
+            ORDER BY f.category, f.title
         """, (profile_id,)).fetchall()
     output = []
     for row in rows:
@@ -719,6 +783,48 @@ def health(profile_id: int = 1):
         d["status"] = "error" if d["last_error"] else ("never_checked" if not d["last_checked"] else "healthy")
         output.append(d)
     return output
+
+@app.post("/api/feeds/{feed_id}/refresh")
+def refresh_feed(feed_id: int):
+    with db() as conn:
+        row = conn.execute("SELECT * FROM feeds WHERE id = ?", (feed_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Feed not found.")
+    threading.Thread(target=refresh_one_feed, args=(dict(row),), daemon=True).start()
+    return {"status": "started", "feed_id": feed_id, "refreshed_at": utc_now()}
+
+@app.post("/api/prune")
+def prune(profile_id: int = 1):
+    now = utc_now()
+    deleted = 0
+    with db() as conn:
+        # Per-feed max_age_days pruning using fetched_at
+        feeds_with_age = conn.execute("""
+            SELECT id, max_age_days FROM feeds
+            WHERE profile_id = ? AND max_age_days IS NOT NULL AND max_age_days > 0
+        """, (profile_id,)).fetchall()
+        for f in feeds_with_age:
+            cur = conn.execute("""
+                DELETE FROM items
+                WHERE feed_id = ? AND is_read = 1 AND is_starred = 0
+                  AND fetched_at < datetime('now', ? || ' days')
+            """, (f["id"], f"-{f['max_age_days']}"))
+            deleted += cur.rowcount
+
+        # Global fallback: prune read, unstarred items older than 90 days fetched_at
+        # for feeds with no max_age_days set
+        cur = conn.execute("""
+            DELETE FROM items
+            WHERE is_read = 1 AND is_starred = 0
+              AND fetched_at < datetime('now', '-90 days')
+              AND feed_id IN (
+                SELECT id FROM feeds
+                WHERE profile_id = ? AND (max_age_days IS NULL OR max_age_days = 0)
+              )
+        """, (profile_id,))
+        deleted += cur.rowcount
+        conn.execute("VACUUM")
+    return {"status": "ok", "deleted": deleted, "pruned_at": now}
 
 @app.get("/api/items")
 def items(
@@ -1263,7 +1369,8 @@ cat > app/static/index.html <<'FRONTENDHTML'
               <span class="categoryTag">${esc(item.category)}</span>
               <span class="feedTitleTag">${esc(item.feed_title)}</span>
               ${item.author ? `<span class="authorTag">by ${esc(item.author)}</span>` : ''}
-              <span class="dateTag">${fmtDate(item.published)}</span>
+              <span class="dateTag" title="Published">${fmtDate(item.published)}</span>
+              <span class="fetchedTag" title="Fetched ${fmtDate(item.fetched_at)}">↓ ${fmtDate(item.fetched_at)}</span>
             </div>
             <h2 class="cardTitle"><a href="${esc(item.link)}" target="_blank" rel="noopener">${esc(item.title)}</a></h2>
             <p class="cardTeaser">${esc(item.teaser)}</p>
@@ -1331,6 +1438,108 @@ cat > app/static/index.html <<'FRONTENDHTML'
       } catch (e) { console.error(e); }
     }
 
+    const healthSort = { col: "title", dir: 1 };
+
+    function renderHealthTable() {
+      const sorted = [...state.health].sort((a, b) => {
+        let av, bv;
+        switch (healthSort.col) {
+          case "title":    av = a.title.toLowerCase();    bv = b.title.toLowerCase();    break;
+          case "category": av = a.category.toLowerCase(); bv = b.category.toLowerCase(); break;
+          case "status":   av = a.status;                 bv = b.status;                 break;
+          case "fetched":  av = a.last_item_fetched_at || ""; bv = b.last_item_fetched_at || ""; break;
+          default:         av = ""; bv = "";
+        }
+        return av < bv ? -1 * healthSort.dir : av > bv ? 1 * healthSort.dir : 0;
+      });
+
+      const arrow = col => healthSort.col === col ? (healthSort.dir === 1 ? " ▲" : " ▼") : "";
+      const th = (col, label) =>
+        `<th class="healthSortable" data-col="${col}" style="cursor:pointer; user-select:none;">${label}${arrow(col)}</th>`;
+
+      const panel = el("healthPanel");
+      panel.innerHTML = `
+        <h2 style="margin-bottom:16px; color:#f8fafc;">Feed Synchronization Diagnostics</h2>
+        <table class="healthTable">
+          <colgroup>
+            <col class="col-title"/><col class="col-category"/><col class="col-status"/>
+            <col class="col-count"/><col class="col-vol"/><col class="col-age"/>
+            <col class="col-fetched"/><col class="col-actions"/>
+          </colgroup>
+          <thead>
+            <tr>
+              ${th("title",    "Stream Label")}
+              ${th("category", "Category")}
+              ${th("status",   "Status")}
+              <th>Unread / Total</th>
+              <th>Max Vol</th>
+              <th>Max Age (days)</th>
+              ${th("fetched",  "Latest Fetch")}
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${sorted.map(f => `
+              <tr class="status-${f.status}">
+                <td>
+                  <strong>${esc(f.title)}</strong><br/>
+                  <small style="color:#94a3b8;">${esc(f.xml_url)}</small>
+                  ${f.last_error ? `<div class="errorText">${esc(f.last_error)}</div>` : ''}
+                </td>
+                <td>${esc(f.category)}</td>
+                <td><span class="badge badge-${f.status}">${f.status}</span></td>
+                <td>${f.unread_count} / ${f.item_count}</td>
+                <td>${f.max_volume ?? '—'}</td>
+                <td>${f.max_age_days ?? '—'}</td>
+                <td>${fmtDate(f.last_item_fetched_at) || 'Never'}</td>
+                <td style="white-space:nowrap;">
+                  <button class="smallRefreshFeedBtn" data-id="${f.id}" title="Refresh this feed now">↻</button>
+                  <button class="smallEditFeedBtn" data-id="${f.id}">Edit</button>
+                  <button class="smallDeleteFeedBtn danger" data-id="${f.id}">Delete</button>
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `;
+
+      panel.querySelectorAll(".healthSortable").forEach(th => {
+        th.addEventListener("click", () => {
+          const col = th.dataset.col;
+          if (healthSort.col === col) {
+            healthSort.dir *= -1;
+          } else {
+            healthSort.col = col;
+            healthSort.dir = 1;
+          }
+          renderHealthTable();
+          wireHealthTable();
+        });
+      });
+
+      wireHealthTable();
+    }
+
+    function wireHealthTable() {
+      const panel = el("healthPanel");
+      panel.querySelectorAll(".smallRefreshFeedBtn").forEach(b => {
+        b.addEventListener("click", async () => {
+          b.disabled = true; b.textContent = "…";
+          try {
+            await api(`/api/feeds/${b.dataset.id}/refresh`, { method: "POST" });
+            showToast("Feed refresh started.");
+          } catch(e) { showToast("Refresh failed."); }
+          setTimeout(() => { b.disabled = false; b.textContent = "↻"; }, 3000);
+        });
+      });
+      panel.querySelectorAll(".smallEditFeedBtn").forEach(b => {
+        b.addEventListener("click", () => openEditFeedModal(Number(b.dataset.id)));
+      });
+      panel.querySelectorAll(".smallDeleteFeedBtn").forEach(b => {
+        b.addEventListener("click", () => deleteFeed(Number(b.dataset.id)));
+      });
+    }
+
     async function showHealth() {
       state.mode = "health";
       el("grid").classList.add("hidden");
@@ -1344,54 +1553,14 @@ cat > app/static/index.html <<'FRONTENDHTML'
 
       try {
         state.health = await api(`/api/health?profile_id=${state.currentProfileId}`);
-        panel.innerHTML = `
-          <h2 style="margin-bottom:16px; color:#f8fafc;">Feed Synchronization Diagnostics</h2>
-          <table class="healthTable">
-            <thead>
-              <tr>
-                <th>Stream Label</th>
-                <th>Category</th>
-                <th>Status</th>
-                <th>Count</th>
-                <th>Latest Capture</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${state.health.map(f => `
-                <tr class="status-${f.status}">
-                  <td>
-                    <strong>${esc(f.title)}</strong><br/>
-                    <small style="color:#94a3b8;">${esc(f.xml_url)}</small>
-                    ${f.last_error ? `<div class="errorText">${esc(f.last_error)}</div>` : ''}
-                  </td>
-                  <td>${esc(f.category)}</td>
-                  <td><span class="badge badge-${f.status}">${f.status}</span></td>
-                  <td>${f.unread_count} / ${f.item_count}</td>
-                  <td>${fmtDate(f.last_item_fetched_at) || 'Never'}</td>
-                  <td>
-                    <button class="smallEditFeedBtn" data-id="${f.id}">Edit</button>
-                    <button class="smallDeleteFeedBtn danger" data-id="${f.id}">Delete</button>
-                  </td>
-                </tr>
-              `).join('')}
-            </tbody>
-          </table>
-        `;
-
-        panel.querySelectorAll(".smallEditFeedBtn").forEach(b => {
-          b.addEventListener("click", () => openEditFeedModal(Number(b.dataset.id)));
-        });
-        panel.querySelectorAll(".smallDeleteFeedBtn").forEach(b => {
-          b.addEventListener("click", () => deleteFeed(Number(b.dataset.id)));
-        });
-
+        renderHealthTable();
       } catch(e) { panel.innerHTML = "Failed diagnostics fetch."; }
     }
 
     function openEditFeedModal(id) {
       const f = state.health.find(x => x.id === id);
       if (!f) return;
+      const cats = [...new Set(state.health.map(x => x.category))].sort();
       el("modalTitle").textContent = "Edit Feed Settings";
       el("modalBody").innerHTML = `
         <div class="form-field" style="margin-bottom:12px;">
@@ -1400,15 +1569,26 @@ cat > app/static/index.html <<'FRONTENDHTML'
         </div>
         <div class="form-field" style="margin-bottom:12px;">
           <label style="display:block; margin-bottom:4px; color:#cbd5e1;">Category Assignment</label>
-          <input type="text" id="editFeedCategory" value="${esc(f.category)}" />
+          <input type="text" id="editFeedCategory" value="${esc(f.category)}" list="editCategoryList" />
+          <datalist id="editCategoryList">${cats.map(c => `<option value="${esc(c)}">`).join('')}</datalist>
         </div>
         <div class="form-field" style="margin-bottom:12px;">
           <label style="display:block; margin-bottom:4px; color:#cbd5e1;">XML Endpoint Address</label>
           <input type="url" id="editFeedXmlUrl" value="${esc(f.xml_url)}" />
         </div>
-        <div class="form-field">
+        <div class="form-field" style="margin-bottom:12px;">
           <label style="display:block; margin-bottom:4px; color:#cbd5e1;">Homepage Web Address</label>
           <input type="url" id="editFeedHtmlUrl" value="${esc(f.html_url)}" />
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div class="form-field">
+            <label style="display:block; margin-bottom:4px; color:#cbd5e1;">Max volume <small style="color:#64748b;">(items per fetch)</small></label>
+            <input type="number" id="editFeedMaxVolume" value="${f.max_volume ?? ''}" placeholder="Default (${100})" min="1" max="500" />
+          </div>
+          <div class="form-field">
+            <label style="display:block; margin-bottom:4px; color:#cbd5e1;">Max age <small style="color:#64748b;">(days before pruning)</small></label>
+            <input type="number" id="editFeedMaxAge" value="${f.max_age_days ?? ''}" placeholder="Default (90)" min="1" max="3650" />
+          </div>
         </div>
       `;
 
@@ -1417,11 +1597,15 @@ cat > app/static/index.html <<'FRONTENDHTML'
       saveBtn.parentNode.replaceChild(clone, saveBtn);
 
       clone.addEventListener("click", async () => {
+        const maxVol = el("editFeedMaxVolume").value;
+        const maxAge = el("editFeedMaxAge").value;
         const payload = {
-          title: el("editFeedTitle").value.trim(),
-          category: el("editFeedCategory").value.trim(),
-          xml_url: el("editFeedXmlUrl").value.trim(),
-          html_url: el("editFeedHtmlUrl").value.trim()
+          title:        el("editFeedTitle").value.trim(),
+          category:     el("editFeedCategory").value.trim(),
+          xml_url:      el("editFeedXmlUrl").value.trim(),
+          html_url:     el("editFeedHtmlUrl").value.trim(),
+          max_volume:   maxVol ? parseInt(maxVol) : null,
+          max_age_days: maxAge ? parseInt(maxAge) : null,
         };
         if (!payload.title || !payload.category || !payload.xml_url) return alert("Fill required fields.");
         try {
@@ -1474,9 +1658,14 @@ cat > app/static/index.html <<'FRONTENDHTML'
             <h3 style="margin-bottom:12px; font-size:1.1rem; color:#cbd5e1;">Register New Subscription Target</h3>
             <div style="display:grid; grid-template-columns:1fr; gap:12px; margin-bottom:16px;">
               <input type="text" id="addFeedTitle" placeholder="Custom feed shorthand title (e.g. Wired Security)" style="background:var(--bg-app); color:var(--text-main); border:1px solid var(--border-color); padding:8px; border-radius:6px;" />
-              <input type="text" id="addFeedCategory" placeholder="Target Category box grouping (e.g. Security)" style="background:var(--bg-app); color:var(--text-main); border:1px solid var(--border-color); padding:8px; border-radius:6px;" />
+              <input type="text" id="addFeedCategory" placeholder="Category (e.g. Security)" list="addCategoryList" style="background:var(--bg-app); color:var(--text-main); border:1px solid var(--border-color); padding:8px; border-radius:6px;" />
+              <datalist id="addCategoryList">${state.meta ? state.meta.categories.map(c => `<option value="${esc(c.category)}">`).join('') : ''}</datalist>
               <input type="url" id="addFeedXmlUrl" placeholder="Direct link RSS/Atom XML endpoint" style="background:var(--bg-app); color:var(--text-main); border:1px solid var(--border-color); padding:8px; border-radius:6px;" />
               <input type="url" id="addFeedHtmlUrl" placeholder="Optional standard website homepage URL" style="background:var(--bg-app); color:var(--text-main); border:1px solid var(--border-color); padding:8px; border-radius:6px;" />
+              <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+                <input type="number" id="addFeedMaxVolume" placeholder="Max volume (default 100)" min="1" max="500" style="background:var(--bg-app); color:var(--text-main); border:1px solid var(--border-color); padding:8px; border-radius:6px;" />
+                <input type="number" id="addFeedMaxAge" placeholder="Max age days (default 90)" min="1" max="3650" style="background:var(--bg-app); color:var(--text-main); border:1px solid var(--border-color); padding:8px; border-radius:6px;" />
+              </div>
             </div>
             <button id="submitNewFeedBtn" style="width:100%; padding:10px;">Register Stream Instance</button>
           </div>
@@ -1493,6 +1682,14 @@ cat > app/static/index.html <<'FRONTENDHTML'
                 <span style="font-size:0.8rem; font-weight:bold; color:#94a3b8;">Backup feeds:</span>
                 <button id="exportOpmlBtn" class="secondary" style="padding:8px 14px;">Download OPML</button>
               </div>
+            </div>
+          </div>
+
+          <div style="padding-top:20px; margin-top:4px; border-top:1px dashed #334155;">
+            <h3 style="margin-bottom:12px; font-size:1.1rem; color:#cbd5e1;">Database Maintenance</h3>
+            <div style="display:flex; align-items:center; gap:12px; background:var(--bg-app); padding:14px; border-radius:6px; border:1px solid var(--border-color);">
+              <div style="flex:1; font-size:0.85rem; color:#94a3b8;">Remove read, unstarred items beyond each feed's max age (default 90 days). Uses ingestion timestamp, not article date.</div>
+              <button id="pruneNowBtn" class="secondary" style="padding:8px 14px; white-space:nowrap;">Prune now</button>
             </div>
           </div>
         </div>
@@ -1527,11 +1724,15 @@ cat > app/static/index.html <<'FRONTENDHTML'
       });
 
       el("submitNewFeedBtn").addEventListener("click", async () => {
+        const maxVol = el("addFeedMaxVolume").value;
+        const maxAge = el("addFeedMaxAge").value;
         const payload = {
-          title: el("addFeedTitle").value.trim(),
-          category: el("addFeedCategory").value.trim(),
-          xml_url: el("addFeedXmlUrl").value.trim(),
-          html_url: el("addFeedHtmlUrl").value.trim()
+          title:        el("addFeedTitle").value.trim(),
+          category:     el("addFeedCategory").value.trim(),
+          xml_url:      el("addFeedXmlUrl").value.trim(),
+          html_url:     el("addFeedHtmlUrl").value.trim(),
+          max_volume:   maxVol ? parseInt(maxVol) : null,
+          max_age_days: maxAge ? parseInt(maxAge) : null,
         };
         if (!payload.title || !payload.category || !payload.xml_url) return alert("Fill core subscription parameters.");
         try {
@@ -1541,9 +1742,22 @@ cat > app/static/index.html <<'FRONTENDHTML'
           el("addFeedCategory").value = "";
           el("addFeedXmlUrl").value = "";
           el("addFeedHtmlUrl").value = "";
+          el("addFeedMaxVolume").value = "";
+          el("addFeedMaxAge").value = "";
           await loadMeta();
           await loadFeeds();
         } catch(e) { alert(e); }
+      });
+
+      el("pruneNowBtn").addEventListener("click", async () => {
+        const btn = el("pruneNowBtn");
+        btn.disabled = true; btn.textContent = "Pruning…";
+        try {
+          const res = await api(`/api/prune?profile_id=${state.currentProfileId}`, { method: "POST" });
+          showToast(`Pruned ${res.deleted} item${res.deleted !== 1 ? 's' : ''}.`);
+          await loadMeta();
+        } catch(e) { showToast("Prune failed."); }
+        btn.disabled = false; btn.textContent = "Prune now";
       });
 
       el("importOpmlBtn").addEventListener("click", async () => {
@@ -2123,6 +2337,7 @@ button.secondary:hover { background: #334155; }
 }
 .categoryTag { background: #1e3a8a; color: #93c5fd; padding: 2px 6px; border-radius: 4px; font-weight: 600; }
 .feedTitleTag { color: #f1f5f9; font-weight: 600; }
+.fetchedTag { color: #475569; font-size: 0.7rem; font-style: italic; }
 
 .cardTitle {
   font-size: 1.05rem;
@@ -2174,9 +2389,20 @@ button.secondary:hover { background: #334155; }
 
 /* Diagnostics System Sheet overrides */
 .healthPanel { padding: 16px; background: var(--bg-card); margin: 16px; border-radius: var(--radius); border: 1px solid var(--border-color); overflow-x: auto; }
-.healthTable { width: 100%; border-collapse: collapse; font-size: 0.9rem; color: #f8fafc; }
-.healthTable th, .healthTable td { padding: 12px; border-bottom: 1px solid #334155; }
-.healthTable th { background: var(--bg-app); }
+.healthTable { width: 100%; border-collapse: collapse; font-size: 0.9rem; color: #f8fafc; table-layout: fixed; }
+.healthTable th, .healthTable td { padding: 10px 12px; border-bottom: 1px solid #334155; vertical-align: top; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.healthTable th { background: var(--bg-app); text-align: left; font-weight: 600; font-size: 0.78rem; color: #94a3b8; letter-spacing: 0.03em; white-space: nowrap; }
+.healthTable td:first-child { white-space: normal; }
+.healthTable col.col-title    { width: 28%; }
+.healthTable col.col-category { width: 10%; }
+.healthTable col.col-status   { width: 8%; }
+.healthTable col.col-count    { width: 9%; }
+.healthTable col.col-vol      { width: 7%; }
+.healthTable col.col-age      { width: 9%; }
+.healthTable col.col-fetched  { width: 14%; }
+.healthTable col.col-actions  { width: 15%; }
+.healthTable th.healthSortable:hover { color: #f1f5f9; background: #1e293b; }
+.healthTable tbody tr:hover { background: rgba(255,255,255,0.03); }
 .errorText { color: #ef4444; font-size: 0.8rem; margin-top: 4px; font-family: monospace; }
 .badge { display: inline-block; padding: 2px 6px; font-size: 0.7rem; font-weight: 600; border-radius: 4px; }
 .badge-error { background: #7f1d1d; color: #fca5a5; }
