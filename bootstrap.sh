@@ -1348,7 +1348,10 @@ cat > app/static/index.html <<'FRONTENDHTML'
         hash = (hash * 31 + feedTitle.charCodeAt(i)) & 0xffffffff;
       }
       const hue = Math.abs(hash) % 360;
-      return `hsl(${hue}, 28%, 22%)`;
+      const isLight = document.documentElement.getAttribute("data-theme") === "light";
+      return isLight
+        ? `hsl(${hue}, 35%, 82%)`
+        : `hsl(${hue}, 28%, 22%)`;
     }
 
     function renderItems(chunk) {
@@ -2029,21 +2032,27 @@ cat > app/static/styles.css <<'CUSTOMCSS'
   --primary-hover: #14474d;
   --bg-app: #0f172a;
   --bg-card: #1e293b;
+  --bg-hover: #2d3f55;
   --border-color: #334155;
   --text-main: #f8fafc;
   --text-muted: #94a3b8;
+  --tag-bg: #1e3a8a;
+  --tag-color: #93c5fd;
+  --placeholder-text: rgba(255,255,255,0.18);
   --radius: 8px;
-  --theme-toggle-icon: "☀️";
   color-scheme: dark;
 }
 
 [data-theme="light"] {
   --bg-app: #f1f5f9;
   --bg-card: #ffffff;
+  --bg-hover: #e2e8f0;
   --border-color: #e2e8f0;
   --text-main: #0f172a;
   --text-muted: #64748b;
-  --theme-toggle-icon: "🌙";
+  --tag-bg: #dbeafe;
+  --tag-color: #1e40af;
+  --placeholder-text: rgba(0,0,0,0.12);
   color-scheme: light;
 }
 
@@ -2256,7 +2265,7 @@ button.secondary {
   background: var(--bg-card);
   border: 1px solid var(--border-color);
 }
-button.secondary:hover { background: #334155; }
+button.secondary:hover { background: var(--bg-hover); }
 
 .toggle {
   display: inline-flex;
@@ -2321,7 +2330,7 @@ button.secondary:hover { background: #334155; }
   font-size: 2.4rem;
   font-weight: 800;
   letter-spacing: -0.02em;
-  color: rgba(255,255,255,0.18);
+  color: var(--placeholder-text);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
@@ -2343,9 +2352,9 @@ button.secondary:hover { background: #334155; }
   margin-bottom: 8px;
   flex-shrink: 0;
 }
-.categoryTag { background: #1e3a8a; color: #93c5fd; padding: 2px 6px; border-radius: 4px; font-weight: 600; }
-.feedTitleTag { color: #f1f5f9; font-weight: 600; }
-.fetchedTag { color: #475569; font-size: 0.7rem; font-style: italic; }
+.categoryTag { background: var(--tag-bg); color: var(--tag-color); padding: 2px 6px; border-radius: 4px; font-weight: 600; }
+.feedTitleTag { color: var(--text-main); font-weight: 600; }
+.fetchedTag { color: var(--text-muted); font-size: 0.7rem; font-style: italic; }
 
 .cardTitle {
   font-size: 1.05rem;
@@ -2377,7 +2386,7 @@ button.secondary:hover { background: #334155; }
   gap: 16px;
   margin-top: auto;
   padding-top: 10px;
-  border-top: 1px solid #334155;
+  border-top: 1px solid var(--border-color);
 }
 
 .iconAction {
@@ -2399,7 +2408,7 @@ button.secondary:hover { background: #334155; }
 .healthPanel { padding: 16px; background: var(--bg-card); margin: 16px; border-radius: var(--radius); border: 1px solid var(--border-color); overflow-x: auto; }
 .healthTable { width: 100%; border-collapse: collapse; font-size: 0.9rem; color:var(--text-main); table-layout: fixed; }
 .healthTable th, .healthTable td { padding: 10px 12px; border-bottom: 1px solid #334155; vertical-align: top; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.healthTable th { background: var(--bg-app); text-align: left; font-weight: 600; font-size: 0.78rem; color: #94a3b8; letter-spacing: 0.03em; white-space: nowrap; }
+.healthTable th { background: var(--bg-app); text-align: left; font-weight: 600; font-size: 0.78rem; color: var(--text-muted); letter-spacing: 0.03em; white-space: nowrap; }
 .healthTable td:first-child { white-space: normal; }
 .healthTable col.col-title    { width: 28%; }
 .healthTable col.col-category { width: 10%; }
@@ -2409,12 +2418,15 @@ button.secondary:hover { background: #334155; }
 .healthTable col.col-age      { width: 9%; }
 .healthTable col.col-fetched  { width: 14%; }
 .healthTable col.col-actions  { width: 15%; }
-.healthTable th.healthSortable:hover { color: #f1f5f9; background: #1e293b; }
-.healthTable tbody tr:hover { background: rgba(255,255,255,0.03); }
+.healthTable th.healthSortable:hover { color: var(--text-main); background: var(--bg-hover); }
+.healthTable tbody tr:hover { background: var(--bg-hover); }
 .errorText { color: #ef4444; font-size: 0.8rem; margin-top: 4px; font-family: monospace; }
 .badge { display: inline-block; padding: 2px 6px; font-size: 0.7rem; font-weight: 600; border-radius: 4px; }
-.badge-error { background: #7f1d1d; color: #fca5a5; }
+.badge-error   { background: #7f1d1d; color: #fca5a5; }
 .badge-healthy { background: #14532d; color: #86efac; }
+.badge-never_checked { background: var(--bg-hover); color: var(--text-muted); }
+[data-theme="light"] .badge-error   { background: #fee2e2; color: #991b1b; }
+[data-theme="light"] .badge-healthy { background: #dcfce7; color: #166534; }
 
 
 
@@ -2452,7 +2464,7 @@ button.secondary:hover { background: #334155; }
   }
   .filterDrawerHandle {
     width: 36px; height: 4px;
-    background: #475569;
+    background: var(--border-color);
     border-radius: 2px;
     margin: 0 auto 4px;
   }
