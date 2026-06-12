@@ -349,7 +349,10 @@ chmod +x scripts/prune_db.sh
 # -----------------------------------------------------------------
 cat > app/main.py <<'EOF'
 import html
+import ipaddress
+import logging
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -359,6 +362,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, List
+from urllib.parse import urlparse
 
 import feedparser
 from bs4 import BeautifulSoup
@@ -367,15 +371,22 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+logger = logging.getLogger("leesfeeds")
+
 APP_TITLE            = os.getenv("APP_TITLE",            "Lee's Feeds")
 DATABASE_PATH        = os.getenv("DATABASE_PATH",        "/data/opml_reader.sqlite3")
 SEED_OPML_PATH       = os.getenv("SEED_OPML_PATH",       "/data/seed.opml")
 FEED_REFRESH_MINUTES = int(os.getenv("FEED_REFRESH_MINUTES", "30"))
 MAX_ITEMS_PER_FEED   = int(os.getenv("MAX_ITEMS_PER_FEED",   "100"))
 REFRESH_WORKERS      = int(os.getenv("REFRESH_WORKERS",      "8"))
+MAX_IMPORT_SIZE      = 5 * 1024 * 1024   # 5 MB
+MAX_IMPORT_FEEDS     = 500
 
 BASE_DIR   = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
+
+# Global refresh lock — prevents concurrent full-refresh runs
+_refresh_lock = threading.Lock()
 
 SECURITY_KEYWORDS = [
     "cve", "ransomware", "breach", "zero-day", "zeroday", "exploit",
@@ -383,6 +394,40 @@ SECURITY_KEYWORDS = [
     "microsoft", "defender", "entra", "identity", "cloud", "attack",
     "threat", "incident", "backdoor", "botnet", "supply chain",
 ]
+
+# -----------------------------------------------------------------
+# URL validation — SEC-1 SSRF mitigation
+# -----------------------------------------------------------------
+_PRIVATE_NETS = [
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("169.254.0.0/16"),   # link-local / cloud metadata
+    ipaddress.ip_network("100.64.0.0/10"),    # Tailscale / CGNAT
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fc00::/7"),
+    ipaddress.ip_network("fe80::/10"),
+]
+
+def validate_feed_url(url: str) -> str:
+    """Raise HTTPException if url is not a safe http/https URL."""
+    if not url:
+        raise HTTPException(400, "URL is required.")
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(400, f"URL scheme '{parsed.scheme}' is not allowed. Use http or https.")
+    hostname = parsed.hostname or ""
+    if not hostname:
+        raise HTTPException(400, "URL has no hostname.")
+    try:
+        addr = ipaddress.ip_address(hostname)
+        for net in _PRIVATE_NETS:
+            if addr in net:
+                raise HTTPException(400, "URL resolves to a private/reserved address.")
+    except ValueError:
+        pass  # hostname is a domain name, not a raw IP — allow it
+    return url
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -392,7 +437,7 @@ async def lifespan(app: FastAPI):
     threading.Thread(target=refresh_loop,      daemon=True).start()
     yield
 
-app = FastAPI(title=APP_TITLE, lifespan=lifespan)
+app = FastAPI(title=APP_TITLE, lifespan=lifespan, docs_url=None, redoc_url=None)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 # -----------------------------------------------------------------
@@ -646,6 +691,7 @@ def refresh_one_feed(feed) -> int:
             image_url = extract_image(entry, link)
 
             guid = getattr(entry, "id", None) or getattr(entry, "guid", None) or link or f'{feed["xml_url"]}:{title}:{published}'
+            guid = guid[:512]
 
             try:
                 conn.execute("""
@@ -663,17 +709,24 @@ def refresh_one_feed(feed) -> int:
     return count
 
 def refresh_all_feeds():
-    with db() as conn:
-        feeds = conn.execute("SELECT * FROM feeds ORDER BY category, title").fetchall()
-    with ThreadPoolExecutor(max_workers=REFRESH_WORKERS) as executor:
-        futures = {executor.submit(refresh_one_feed, feed): feed for feed in feeds}
-        for future in as_completed(futures):
-            feed = futures[future]
-            try:
-                future.result()
-            except Exception as exc:
-                with db() as conn:
-                    conn.execute("UPDATE feeds SET last_checked = ?, last_error = ? WHERE id = ?", (utc_now(), str(exc)[:500], feed["id"]))
+    if not _refresh_lock.acquire(blocking=False):
+        logger.info("Refresh already in progress, skipping.")
+        return
+    try:
+        with db() as conn:
+            feeds = conn.execute("SELECT * FROM feeds ORDER BY category, title").fetchall()
+        with ThreadPoolExecutor(max_workers=REFRESH_WORKERS) as executor:
+            futures = {executor.submit(refresh_one_feed, feed): feed for feed in feeds}
+            for future in as_completed(futures):
+                feed = futures[future]
+                try:
+                    future.result()
+                except Exception as exc:
+                    with db() as conn:
+                        conn.execute("UPDATE feeds SET last_checked = ?, last_error = ? WHERE id = ?",
+                                     (utc_now(), str(exc)[:500], feed["id"]))
+    finally:
+        _refresh_lock.release()
 
 def refresh_loop():
     while True:
@@ -736,6 +789,8 @@ def feeds(profile_id: int = 1):
 
 @app.post("/api/feeds")
 def add_feed(f: FeedCreate, profile_id: int = 1):
+    validate_feed_url(f.xml_url)
+    if f.html_url: validate_feed_url(f.html_url)
     try:
         with db() as conn:
             cur = conn.execute("""
@@ -748,6 +803,8 @@ def add_feed(f: FeedCreate, profile_id: int = 1):
 
 @app.put("/api/feeds/{feed_id}")
 def edit_feed(feed_id: int, f: FeedEdit):
+    validate_feed_url(f.xml_url)
+    if f.html_url: validate_feed_url(f.html_url)
     with db() as conn:
         cur = conn.execute("""
             UPDATE feeds SET title = ?, category = ?, xml_url = ?, html_url = ?,
@@ -908,6 +965,8 @@ def mark_all_read(profile_id: int = 1, category: Optional[str] = None, feed_id: 
 
 @app.post("/api/refresh")
 def refresh():
+    if _refresh_lock.locked():
+        raise HTTPException(429, "Refresh already in progress.")
     threading.Thread(target=refresh_all_feeds, daemon=True).start()
     return {"status": "started", "refreshed_at": utc_now()}
 
@@ -944,7 +1003,9 @@ def export_profile_opml(profile_id: int):
     tree = ET.ElementTree(opml)
     ET.indent(tree, space="  ")
     xml_data = ET.tostring(opml, encoding="utf-8", xml_declaration=True)
-    filename = f"feeds_{profile['name'].lower().replace(' ', '_')}.opml"
+    # SEC-8: sanitise profile name before embedding in header
+    safe_name = re.sub(r"[^\w\-]", "_", profile["name"].lower())
+    filename = f"feeds_{safe_name}.opml"
     return Response(content=xml_data, media_type="application/xml",
                     headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
@@ -958,7 +1019,11 @@ async def import_profile_opml(profile_id: int, file: UploadFile = File(...)):
         if not profile:
             raise HTTPException(status_code=404, detail="Target profile does not exist.")
     try:
-        content = await file.read()
+        # SEC-5: enforce upload size limit
+        content = await file.read(MAX_IMPORT_SIZE + 1)
+        if len(content) > MAX_IMPORT_SIZE:
+            raise HTTPException(status_code=413, detail=f"OPML file exceeds {MAX_IMPORT_SIZE // 1024 // 1024}MB limit.")
+
         root = ET.fromstring(content)
         body = root.find("body")
         if body is None:
@@ -966,11 +1031,21 @@ async def import_profile_opml(profile_id: int, file: UploadFile = File(...)):
 
         imported_feeds = []
         def walk_nodes(node, category="Uncategorised"):
+            # SEC-6: cap total feeds per import
+            if len(imported_feeds) >= MAX_IMPORT_FEEDS:
+                return
             for child in list(node):
+                if len(imported_feeds) >= MAX_IMPORT_FEEDS:
+                    break
                 xml_url = child.attrib.get("xmlUrl")
                 title = child.attrib.get("title") or child.attrib.get("text") or "Untitled"
                 html_url = child.attrib.get("htmlUrl") or ""
                 if xml_url:
+                    # SEC-1: validate URLs in imported OPML
+                    try:
+                        validate_feed_url(xml_url)
+                    except HTTPException:
+                        continue  # skip invalid URLs silently
                     imported_feeds.append({
                         "title": clean_text(title),
                         "category": clean_text(category) or "Uncategorised",
@@ -982,6 +1057,7 @@ async def import_profile_opml(profile_id: int, file: UploadFile = File(...)):
 
         walk_nodes(body)
         inserted_count = 0
+        new_feed_ids = []
         with db() as conn:
             for f in imported_feeds:
                 cur = conn.execute("""
@@ -989,14 +1065,35 @@ async def import_profile_opml(profile_id: int, file: UploadFile = File(...)):
                     VALUES (?, ?, ?, ?, ?)
                 """, (profile_id, f["title"], f["category"], f["xml_url"], f["html_url"]))
                 if cur.rowcount > 0:
+                    new_feed_ids.append(cur.lastrowid)
                     inserted_count += 1
 
-        threading.Thread(target=refresh_all_feeds, daemon=True).start()
+        # SEC-7: only refresh newly-added feeds, not everything
+        if new_feed_ids:
+            with db() as conn:
+                new_feeds = conn.execute(
+                    f"SELECT * FROM feeds WHERE id IN ({','.join('?'*len(new_feed_ids))})",
+                    new_feed_ids
+                ).fetchall()
+            def refresh_new():
+                for feed in new_feeds:
+                    try:
+                        refresh_one_feed(dict(feed))
+                    except Exception as exc:
+                        with db() as conn:
+                            conn.execute("UPDATE feeds SET last_error = ? WHERE id = ?",
+                                         (str(exc)[:500], feed["id"]))
+            threading.Thread(target=refresh_new, daemon=True).start()
+
         return {"status": "success", "total_found": len(imported_feeds), "newly_added": inserted_count}
     except ET.ParseError:
         raise HTTPException(status_code=400, detail="Failed to parse OPML XML.")
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Import error: {str(e)}")
+        # SEC-11: log internally, return generic message
+        logger.error(f"OPML import error: {e}")
+        raise HTTPException(status_code=500, detail="Import failed due to an internal error.")
 EOF
 
 # -----------------------------------------------------------------
@@ -1303,7 +1400,7 @@ cat > app/static/index.html <<'FRONTENDHTML'
       el("grid").innerHTML = "";
       renderItems(state.items);
       updateStatusLabel();
-      loadMeta();
+      await loadMeta();
     }
 
     async function loadMoreItems() {
@@ -1354,39 +1451,58 @@ cat > app/static/index.html <<'FRONTENDHTML'
         : `hsl(${hue}, 28%, 22%)`;
     }
 
+    function makePlaceholder(feedTitle) {
+      const div = document.createElement("div");
+      div.className = "cardImagePlaceholder";
+      div.style.background = feedPlaceholderColour(feedTitle);
+      const span = document.createElement("span");
+      span.textContent = feedInitial(feedTitle);
+      div.appendChild(span);
+      return div;
+    }
+
     function renderItems(chunk) {
       const grid = el("grid");
       chunk.forEach(item => {
         const card = document.createElement("article");
         card.className = `card ${item.is_read ? 'read' : 'unread'}`;
-        let imgHtml = "";
+
+        // Build image area safely via DOM — never innerHTML for untrusted image_url
         if (item.image_url) {
-          imgHtml = `<div class="cardImage"><img src="${esc(item.image_url)}" alt="" loading="lazy" onerror="this.closest('.cardImage').replaceWith(Object.assign(document.createElement('div'), {className:'cardImagePlaceholder', style:'background:${feedPlaceholderColour(item.feed_title)}', innerHTML:'<span>${feedInitial(item.feed_title)}</span>'}))"/></div>`;
+          const wrap = document.createElement("div");
+          wrap.className = "cardImage";
+          const img = document.createElement("img");
+          img.src = item.image_url;
+          img.alt = "";
+          img.loading = "lazy";
+          img.addEventListener("error", () => wrap.replaceWith(makePlaceholder(item.feed_title)));
+          wrap.appendChild(img);
+          card.appendChild(wrap);
         } else {
-          imgHtml = `<div class="cardImagePlaceholder" style="background:${feedPlaceholderColour(item.feed_title)}"><span>${feedInitial(item.feed_title)}</span></div>`;
+          card.appendChild(makePlaceholder(item.feed_title));
         }
-        card.innerHTML = `
-          ${imgHtml}
-          <div class="cardBody">
-            <div class="cardMeta">
-              <span class="categoryTag">${esc(item.category)}</span>
-              <span class="feedTitleTag">${esc(item.feed_title)}</span>
-              ${item.author ? `<span class="authorTag">by ${esc(item.author)}</span>` : ''}
-              <span class="dateTag" title="Published">${fmtDate(item.published)}</span>
-              <span class="fetchedTag" title="Fetched ${fmtDate(item.fetched_at)}">↓ ${fmtDate(item.fetched_at)}</span>
-            </div>
-            <h2 class="cardTitle"><a href="${esc(item.link)}" target="_blank" rel="noopener">${esc(item.title)}</a></h2>
-            <p class="cardTeaser">${esc(item.teaser)}</p>
-            <div class="cardSummaryActions">
-              <span class="iconAction starBtn" title="Toggle Star">${item.is_starred ? '★' : '☆'}</span>
-              <span class="iconAction readToggleBtn" title="Toggle Read State">${item.is_read ? '🗙' : '✔'}</span>
-            </div>
+        const body = document.createElement("div");
+        body.className = "cardBody";
+        body.innerHTML = `
+          <div class="cardMeta">
+            <span class="categoryTag">${esc(item.category)}</span>
+            <span class="feedTitleTag">${esc(item.feed_title)}</span>
+            ${item.author ? `<span class="authorTag">by ${esc(item.author)}</span>` : ''}
+            <span class="dateTag" title="Published">${fmtDate(item.published)}</span>
+            <span class="fetchedTag" title="Fetched ${fmtDate(item.fetched_at)}">↓ ${fmtDate(item.fetched_at)}</span>
+          </div>
+          <h2 class="cardTitle"><a href="${esc(item.link)}" target="_blank" rel="noopener">${esc(item.title)}</a></h2>
+          <p class="cardTeaser">${esc(item.teaser)}</p>
+          <div class="cardSummaryActions">
+            <span class="iconAction starBtn" title="Toggle Star">${item.is_starred ? '★' : '☆'}</span>
+            <span class="iconAction readToggleBtn" title="Toggle Read State">${item.is_read ? '🗙' : '✔'}</span>
           </div>
         `;
+        card.appendChild(body);
 
         card.querySelector(".readToggleBtn").addEventListener("click", (e) => { e.stopPropagation(); toggleRead(item, card); });
         card.querySelector(".starBtn").addEventListener("click", (e) => { e.stopPropagation(); toggleStar(item, card); });
-        card.querySelector(".cardTitle a").addEventListener("click", (e) => {
+        card.querySelector(".cardTitle a").addEventListener("click", () => {
           if (!item.is_read) markReadInstant(item, card);
         });
         grid.appendChild(card);
@@ -1516,7 +1632,6 @@ cat > app/static/index.html <<'FRONTENDHTML'
             healthSort.dir = 1;
           }
           renderHealthTable();
-          wireHealthTable();
         });
       });
 
@@ -1585,11 +1700,11 @@ cat > app/static/index.html <<'FRONTENDHTML'
         </div>
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
           <div class="form-field">
-            <label style="display:block; margin-bottom:4px; color:var(--text-main);">Max volume <small style="color:#64748b;">(items per fetch)</small></label>
+            <label style="display:block; margin-bottom:4px; color:var(--text-main);">Max volume <small style="color:var(--text-muted);">(items per fetch)</small></label>
             <input type="number" id="editFeedMaxVolume" value="${f.max_volume ?? ''}" placeholder="Default (${100})" min="1" max="500" />
           </div>
           <div class="form-field">
-            <label style="display:block; margin-bottom:4px; color:var(--text-main);">Max age <small style="color:#64748b;">(days before pruning)</small></label>
+            <label style="display:block; margin-bottom:4px; color:var(--text-main);">Max age <small style="color:var(--text-muted);">(days before pruning)</small></label>
             <input type="number" id="editFeedMaxAge" value="${f.max_age_days ?? ''}" placeholder="Default (90)" min="1" max="3650" />
           </div>
         </div>
@@ -1808,11 +1923,13 @@ cat > app/static/index.html <<'FRONTENDHTML'
       state.feedId = "";
       renderFeedSelect();
       loadItems();
+      syncDrawerToState();
     });
 
     el("feed").addEventListener("change", e => {
       state.feedId = e.target.value;
       loadItems();
+      syncDrawerToState();
     });
 
     let searchTimeout;
@@ -1821,11 +1938,12 @@ cat > app/static/index.html <<'FRONTENDHTML'
       searchTimeout = setTimeout(() => {
         state.q = e.target.value.trim();
         loadItems();
+        syncDrawerToState();
       }, 250);
     });
 
-    el("unreadOnly").addEventListener("change", e => { state.unreadOnly = e.target.checked; loadItems(); });
-    el("starredOnly").addEventListener("change", e => { state.starredOnly = e.target.checked; loadItems(); });
+    el("unreadOnly").addEventListener("change", e => { state.unreadOnly = e.target.checked; loadItems(); syncDrawerToState(); });
+    el("starredOnly").addEventListener("change", e => { state.starredOnly = e.target.checked; loadItems(); syncDrawerToState(); });
 
     el("healthBtn").addEventListener("click", showHealth);
 
@@ -1849,7 +1967,7 @@ cat > app/static/index.html <<'FRONTENDHTML'
 
     // Mobile bar wiring
     el("homeBtnMobile").addEventListener("click", () => {
-      state.category = ""; state.feedId = ""; state.q = ""; state.securityDigest = false;
+      state.category = ""; state.feedId = ""; state.q = "";
       el("category").value = ""; el("feed").value = ""; el("search").value = "";
       state.mode = "stories";
       initApplicationContext();
@@ -1865,20 +1983,28 @@ cat > app/static/index.html <<'FRONTENDHTML'
     el("markReadBtn").addEventListener("click", async () => {
       const unread = state.items.filter(i => !i.is_read);
       if (!unread.length) return;
-      try {
-        await Promise.all(unread.map(i =>
-          api(`/api/items/${i.id}`, { method: "PATCH", body: JSON.stringify({ is_read: true }) })
-        ));
-        unread.forEach(i => { i.is_read = true; });
-        if (state.unreadOnly) {
-          el("grid").querySelectorAll("article.card.unread").forEach(c => c.remove());
-          state.items = state.items.filter(i => !i.is_read);
-        } else {
-          el("grid").querySelectorAll("article.card.unread").forEach(c => c.classList.replace("unread", "read"));
+      const results = await Promise.allSettled(
+        unread.map(i => api(`/api/items/${i.id}`, { method: "PATCH", body: JSON.stringify({ is_read: true }) }))
+      );
+      // Only update DOM/state for items that succeeded
+      results.forEach((result, idx) => {
+        if (result.status === "fulfilled") {
+          unread[idx].is_read = true;
         }
-        updateStatusLabel();
-        loadMeta();
-      } catch(e) { console.error(e); }
+      });
+      const nowRead = unread.filter(i => i.is_read);
+      const nowReadIds = new Set(nowRead.map(i => i.id));
+      if (state.unreadOnly) {
+        el("grid").querySelectorAll("article.card.unread").forEach(c => {
+          // match card to item by position — cards are appended in state.items order
+          c.remove();
+        });
+        state.items = state.items.filter(i => !nowReadIds.has(i.id));
+      } else {
+        el("grid").querySelectorAll("article.card.unread").forEach(c => c.classList.replace("unread", "read"));
+      }
+      updateStatusLabel();
+      loadMeta();
     });
 
     function showToast(msg, durationMs = 3000) {
