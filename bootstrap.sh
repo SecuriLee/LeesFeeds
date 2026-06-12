@@ -1234,7 +1234,7 @@ cat > app/static/index.html <<'FRONTENDHTML'
         <span title="${m.unread_count} unread">✉️ ${m.unread_count}</span>
         <span title="${m.starred_count} starred">⭐ ${m.starred_count}</span>
         ${m.error_count ? `<span title="${m.error_count} errors" style="color:var(--text-main); font-weight:bold;">⚠️ ${m.error_count}</span>` : ""}
-        <span style="font-style:italic; color:#94a3b8;">${filterLabel}</span>
+        <span style="font-style:italic; color:var(--text-muted);">${filterLabel}</span>
       `;
       const mob = el("statsMobile");
       if (mob) mob.textContent = `✉️ ${m.unread_count}${m.error_count ? `  ⚠️${m.error_count}` : ""}`;
@@ -1459,7 +1459,7 @@ cat > app/static/index.html <<'FRONTENDHTML'
 
       const panel = el("healthPanel");
       panel.innerHTML = `
-        <h2 style="margin-bottom:16px; color:#f8fafc;">Feed Synchronization Diagnostics</h2>
+        <h2 style="margin-bottom:16px; color:var(--text-main);">Feed Synchronization Diagnostics</h2>
         <table class="healthTable">
           <colgroup>
             <col class="col-title"/><col class="col-category"/><col class="col-status"/>
@@ -1483,7 +1483,7 @@ cat > app/static/index.html <<'FRONTENDHTML'
               <tr class="status-${f.status}">
                 <td>
                   <strong>${esc(f.title)}</strong><br/>
-                  <small style="color:#94a3b8;">${esc(f.xml_url)}</small>
+                  <small style="color:var(--text-muted);">${esc(f.xml_url)}</small>
                   ${f.last_error ? `<div class="errorText">${esc(f.last_error)}</div>` : ''}
                 </td>
                 <td>${esc(f.category)}</td>
@@ -1564,29 +1564,29 @@ cat > app/static/index.html <<'FRONTENDHTML'
       el("modalTitle").textContent = "Edit Feed Settings";
       el("modalBody").innerHTML = `
         <div class="form-field" style="margin-bottom:12px;">
-          <label style="display:block; margin-bottom:4px; color:#cbd5e1;">Feed Name</label>
+          <label style="display:block; margin-bottom:4px; color:var(--text-main);">Feed Name</label>
           <input type="text" id="editFeedTitle" value="${esc(f.title)}" />
         </div>
         <div class="form-field" style="margin-bottom:12px;">
-          <label style="display:block; margin-bottom:4px; color:#cbd5e1;">Category Assignment</label>
+          <label style="display:block; margin-bottom:4px; color:var(--text-main);">Category Assignment</label>
           <input type="text" id="editFeedCategory" value="${esc(f.category)}" list="editCategoryList" />
           <datalist id="editCategoryList">${cats.map(c => `<option value="${esc(c)}">`).join('')}</datalist>
         </div>
         <div class="form-field" style="margin-bottom:12px;">
-          <label style="display:block; margin-bottom:4px; color:#cbd5e1;">XML Endpoint Address</label>
+          <label style="display:block; margin-bottom:4px; color:var(--text-main);">XML Endpoint Address</label>
           <input type="url" id="editFeedXmlUrl" value="${esc(f.xml_url)}" />
         </div>
         <div class="form-field" style="margin-bottom:12px;">
-          <label style="display:block; margin-bottom:4px; color:#cbd5e1;">Homepage Web Address</label>
+          <label style="display:block; margin-bottom:4px; color:var(--text-main);">Homepage Web Address</label>
           <input type="url" id="editFeedHtmlUrl" value="${esc(f.html_url)}" />
         </div>
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
           <div class="form-field">
-            <label style="display:block; margin-bottom:4px; color:#cbd5e1;">Max volume <small style="color:#64748b;">(items per fetch)</small></label>
+            <label style="display:block; margin-bottom:4px; color:var(--text-main);">Max volume <small style="color:#64748b;">(items per fetch)</small></label>
             <input type="number" id="editFeedMaxVolume" value="${f.max_volume ?? ''}" placeholder="Default (${100})" min="1" max="500" />
           </div>
           <div class="form-field">
-            <label style="display:block; margin-bottom:4px; color:#cbd5e1;">Max age <small style="color:#64748b;">(days before pruning)</small></label>
+            <label style="display:block; margin-bottom:4px; color:var(--text-main);">Max age <small style="color:#64748b;">(days before pruning)</small></label>
             <input type="number" id="editFeedMaxAge" value="${f.max_age_days ?? ''}" placeholder="Default (90)" min="1" max="3650" />
           </div>
         </div>
@@ -1640,10 +1640,10 @@ cat > app/static/index.html <<'FRONTENDHTML'
 
       panel.innerHTML = `
         <div style="max-width: 600px; margin: 0 auto; background:var(--bg-card); padding:24px; border-radius:8px; border:1px solid var(--border-color);">
-          <h2 style="margin-bottom:20px; color:#f8fafc;">Feed Management Control</h2>
+          <h2 style="margin-bottom:20px; color:var(--text-main);">Feed Management Control</h2>
           
-          <div style="padding-bottom:20px; margin-bottom:20px; border-bottom:1px dashed #334155;">
-            <h3 style="margin-bottom:12px; font-size:1.1rem; color:#cbd5e1;">Switch / Generate Dynamic Profile</h3>
+          <div style="padding-bottom:20px; margin-bottom:20px; border-bottom:1px dashed var(--border-color);">
+            <h3 style="margin-bottom:12px; font-size:1.1rem; color:var(--text-main);">Switch / Generate Dynamic Profile</h3>
             <div style="display:flex; gap:10px; margin-bottom:10px;">
               <select id="manageProfileDropdown" style="flex:1; padding:8px; background:var(--bg-app); color:var(--text-main); border:1px solid var(--border-color); border-radius:6px;"></select>
               <button id="switchToProfileBtn">Switch Context</button>
@@ -1655,7 +1655,7 @@ cat > app/static/index.html <<'FRONTENDHTML'
           </div>
 
           <div>
-            <h3 style="margin-bottom:12px; font-size:1.1rem; color:#cbd5e1;">Register New Subscription Target</h3>
+            <h3 style="margin-bottom:12px; font-size:1.1rem; color:var(--text-main);">Register New Subscription Target</h3>
             <div style="display:grid; grid-template-columns:1fr; gap:12px; margin-bottom:16px;">
               <input type="text" id="addFeedTitle" placeholder="Custom feed shorthand title (e.g. Wired Security)" style="background:var(--bg-app); color:var(--text-main); border:1px solid var(--border-color); padding:8px; border-radius:6px;" />
               <input type="text" id="addFeedCategory" placeholder="Category (e.g. Security)" list="addCategoryList" style="background:var(--bg-app); color:var(--text-main); border:1px solid var(--border-color); padding:8px; border-radius:6px;" />
@@ -1670,25 +1670,25 @@ cat > app/static/index.html <<'FRONTENDHTML'
             <button id="submitNewFeedBtn" style="width:100%; padding:10px;">Register Stream Instance</button>
           </div>
 
-          <div style="padding-top:20px; margin-top:4px; border-top:1px dashed #334155;">
-            <h3 style="margin-bottom:12px; font-size:1.1rem; color:#cbd5e1;">OPML Import / Export</h3>
+          <div style="padding-top:20px; margin-top:4px; border-top:1px dashed var(--border-color);">
+            <h3 style="margin-bottom:12px; font-size:1.1rem; color:var(--text-main);">OPML Import / Export</h3>
             <div style="display:flex; align-items:center; flex-wrap:wrap; gap:12px; background:var(--bg-app); padding:14px; border-radius:6px; border:1px solid var(--border-color);">
               <div style="display:flex; flex-direction:column; gap:4px;">
-                <span style="font-size:0.8rem; font-weight:bold; color:#94a3b8;">Import OPML file:</span>
-                <input type="file" id="opmlFileInput" accept=".opml,.xml" style="font-size:0.85rem; min-height:auto; padding:4px; background:transparent; border:none; color:#94a3b8;" />
+                <span style="font-size:0.8rem; font-weight:bold; color:var(--text-muted);">Import OPML file:</span>
+                <input type="file" id="opmlFileInput" accept=".opml,.xml" style="font-size:0.85rem; min-height:auto; padding:4px; background:transparent; border:none; color:var(--text-muted);" />
               </div>
               <button id="importOpmlBtn" class="secondary" style="padding:8px 14px;">Upload &amp; Merge</button>
               <div style="margin-left:auto; display:flex; flex-direction:column; gap:4px; align-items:flex-end;">
-                <span style="font-size:0.8rem; font-weight:bold; color:#94a3b8;">Backup feeds:</span>
+                <span style="font-size:0.8rem; font-weight:bold; color:var(--text-muted);">Backup feeds:</span>
                 <button id="exportOpmlBtn" class="secondary" style="padding:8px 14px;">Download OPML</button>
               </div>
             </div>
           </div>
 
-          <div style="padding-top:20px; margin-top:4px; border-top:1px dashed #334155;">
-            <h3 style="margin-bottom:12px; font-size:1.1rem; color:#cbd5e1;">Database Maintenance</h3>
+          <div style="padding-top:20px; margin-top:4px; border-top:1px dashed var(--border-color);">
+            <h3 style="margin-bottom:12px; font-size:1.1rem; color:var(--text-main);">Database Maintenance</h3>
             <div style="display:flex; align-items:center; gap:12px; background:var(--bg-app); padding:14px; border-radius:6px; border:1px solid var(--border-color);">
-              <div style="flex:1; font-size:0.85rem; color:#94a3b8;">Remove read, unstarred items beyond each feed's max age (default 90 days). Uses ingestion timestamp, not article date.</div>
+              <div style="flex:1; font-size:0.85rem; color:var(--text-muted);">Remove read, unstarred items beyond each feed's max age (default 90 days). Uses ingestion timestamp, not article date.</div>
               <button id="pruneNowBtn" class="secondary" style="padding:8px 14px; white-space:nowrap;">Prune now</button>
             </div>
           </div>
@@ -1860,13 +1860,21 @@ cat > app/static/index.html <<'FRONTENDHTML'
     el("manageFeedsBtn").addEventListener("click", showManageFeeds);
 
     el("markReadBtn").addEventListener("click", async () => {
-      const p = new URLSearchParams();
-      p.set("profile_id", state.currentProfileId);
-      if (state.category) p.set("category", state.category);
-      if (state.feedId) p.set("feed_id", state.feedId);
+      const unread = state.items.filter(i => !i.is_read);
+      if (!unread.length) return;
       try {
-        await api(`/api/items/mark-all-read?${p}`, { method: "POST" });
-        initApplicationContext();
+        await Promise.all(unread.map(i =>
+          api(`/api/items/${i.id}`, { method: "PATCH", body: JSON.stringify({ is_read: true }) })
+        ));
+        unread.forEach(i => { i.is_read = true; });
+        if (state.unreadOnly) {
+          el("grid").querySelectorAll("article.card.unread").forEach(c => c.remove());
+          state.items = state.items.filter(i => !i.is_read);
+        } else {
+          el("grid").querySelectorAll("article.card.unread").forEach(c => c.classList.replace("unread", "read"));
+        }
+        updateStatusLabel();
+        loadMeta();
       } catch(e) { console.error(e); }
     });
 
@@ -2389,7 +2397,7 @@ button.secondary:hover { background: #334155; }
 
 /* Diagnostics System Sheet overrides */
 .healthPanel { padding: 16px; background: var(--bg-card); margin: 16px; border-radius: var(--radius); border: 1px solid var(--border-color); overflow-x: auto; }
-.healthTable { width: 100%; border-collapse: collapse; font-size: 0.9rem; color: #f8fafc; table-layout: fixed; }
+.healthTable { width: 100%; border-collapse: collapse; font-size: 0.9rem; color:var(--text-main); table-layout: fixed; }
 .healthTable th, .healthTable td { padding: 10px 12px; border-bottom: 1px solid #334155; vertical-align: top; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .healthTable th { background: var(--bg-app); text-align: left; font-weight: 600; font-size: 0.78rem; color: #94a3b8; letter-spacing: 0.03em; white-space: nowrap; }
 .healthTable td:first-child { white-space: normal; }
