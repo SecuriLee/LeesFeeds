@@ -480,6 +480,20 @@ def db():
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
+# Option A — write serialisation lock
+# All INSERT/UPDATE/DELETE operations acquire this lock so concurrent
+# refresh threads never race with each other or with user-triggered writes.
+_write_lock = threading.Lock()
+
+from contextlib import contextmanager
+
+@contextmanager
+def write_db():
+    """Acquire write lock, yield a DB connection, commit on exit."""
+    with _write_lock:
+        with db() as conn:
+            yield conn
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -497,7 +511,7 @@ def clean_text(value: Optional[str], max_len: Optional[int] = None) -> str:
 # -----------------------------------------------------------------
 def init_db():
     Path(DATABASE_PATH).parent.mkdir(parents=True, exist_ok=True)
-    with db() as conn:
+    with write_db() as conn:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS profiles (
                 id   INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -589,7 +603,7 @@ def seed_default_profile():
                     walk(child, next_cat)
 
         walk(body)
-        with db() as conn:
+        with write_db() as conn:
             for f in feeds:
                 conn.execute("""
                     INSERT OR IGNORE INTO feeds (profile_id, title, category, xml_url, html_url)
@@ -653,7 +667,7 @@ def refresh_one_feed(feed) -> int:
 
     # 304 Not Modified — nothing to do, just update last_checked
     if getattr(parsed, "status", None) == 304:
-        with db() as conn:
+        with write_db() as conn:
             conn.execute("UPDATE feeds SET last_checked = ? WHERE id = ?", (now, feed["id"]))
         return 0
 
@@ -681,7 +695,7 @@ def refresh_one_feed(feed) -> int:
 
     volume = feed["max_volume"] or MAX_ITEMS_PER_FEED
 
-    with db() as conn:
+    with write_db() as conn:
         for entry in parsed.entries[:volume]:
             title     = clean_text(getattr(entry, "title", "Untitled story"), 300)
             link      = getattr(entry, "link", "") or feed["html_url"] or ""
@@ -722,7 +736,7 @@ def refresh_all_feeds():
                 try:
                     future.result()
                 except Exception as exc:
-                    with db() as conn:
+                    with write_db() as conn:
                         conn.execute("UPDATE feeds SET last_checked = ?, last_error = ? WHERE id = ?",
                                      (utc_now(), str(exc)[:500], feed["id"]))
     finally:
@@ -749,7 +763,7 @@ def get_profiles():
 @app.post("/api/profiles")
 def create_profile(p: ProfileCreate):
     try:
-        with db() as conn:
+        with write_db() as conn:
             cur = conn.execute("INSERT INTO profiles (name) VALUES (?)", (p.name,))
             return {"id": cur.lastrowid, "name": p.name}
     except sqlite3.IntegrityError:
@@ -792,7 +806,7 @@ def add_feed(f: FeedCreate, profile_id: int = 1):
     validate_feed_url(f.xml_url)
     if f.html_url: validate_feed_url(f.html_url)
     try:
-        with db() as conn:
+        with write_db() as conn:
             cur = conn.execute("""
                 INSERT INTO feeds (profile_id, title, category, xml_url, html_url, max_volume, max_age_days)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -805,7 +819,7 @@ def add_feed(f: FeedCreate, profile_id: int = 1):
 def edit_feed(feed_id: int, f: FeedEdit):
     validate_feed_url(f.xml_url)
     if f.html_url: validate_feed_url(f.html_url)
-    with db() as conn:
+    with write_db() as conn:
         cur = conn.execute("""
             UPDATE feeds SET title = ?, category = ?, xml_url = ?, html_url = ?,
                              max_volume = ?, max_age_days = ?
@@ -816,7 +830,7 @@ def edit_feed(feed_id: int, f: FeedEdit):
 
 @app.delete("/api/feeds/{feed_id}")
 def delete_feed(feed_id: int):
-    with db() as conn:
+    with write_db() as conn:
         conn.execute("DELETE FROM feeds WHERE id = ?", (feed_id,))
     return {"status": "deleted"}
 
@@ -854,8 +868,7 @@ def refresh_feed(feed_id: int):
 def prune(profile_id: int = 1):
     now = utc_now()
     deleted = 0
-    with db() as conn:
-        # Per-feed max_age_days pruning using fetched_at
+    with write_db() as conn:
         feeds_with_age = conn.execute("""
             SELECT id, max_age_days FROM feeds
             WHERE profile_id = ? AND max_age_days IS NOT NULL AND max_age_days > 0
@@ -867,9 +880,6 @@ def prune(profile_id: int = 1):
                   AND fetched_at < datetime('now', ? || ' days')
             """, (f["id"], f"-{f['max_age_days']}"))
             deleted += cur.rowcount
-
-        # Global fallback: prune read, unstarred items older than 90 days fetched_at
-        # for feeds with no max_age_days set
         cur = conn.execute("""
             DELETE FROM items
             WHERE is_read = 1 AND is_starred = 0
@@ -941,7 +951,7 @@ def update_item(item_id: int, state: ItemState):
         params  += [1 if state.is_starred else 0, now if state.is_starred else None]
     if not updates: raise HTTPException(400, "No data provided.")
     params.append(item_id)
-    with db() as conn:
+    with write_db() as conn:
         cur = conn.execute(f"UPDATE items SET {', '.join(updates)} WHERE id = ?", params)
         if cur.rowcount == 0: raise HTTPException(404, "Item not found.")
         row = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
@@ -959,7 +969,7 @@ def mark_all_read(profile_id: int = 1, category: Optional[str] = None, feed_id: 
         where.append("feed_id = ?")
         params.append(feed_id)
     sql = "UPDATE items SET is_read = 1, read_at = ? WHERE " + " AND ".join(where)
-    with db() as conn:
+    with write_db() as conn:
         cur = conn.execute(sql, params)
         return {"updated": cur.rowcount, "read_at": now}
 
@@ -969,6 +979,10 @@ def refresh():
         raise HTTPException(429, "Refresh already in progress.")
     threading.Thread(target=refresh_all_feeds, daemon=True).start()
     return {"status": "started", "refreshed_at": utc_now()}
+
+@app.get("/api/refresh/status")
+def refresh_status():
+    return {"status": "running" if _refresh_lock.locked() else "idle"}
 
 # -----------------------------------------------------------------
 # OPML Export
@@ -1058,7 +1072,7 @@ async def import_profile_opml(profile_id: int, file: UploadFile = File(...)):
         walk_nodes(body)
         inserted_count = 0
         new_feed_ids = []
-        with db() as conn:
+        with write_db() as conn:
             for f in imported_feeds:
                 cur = conn.execute("""
                     INSERT OR IGNORE INTO feeds (profile_id, title, category, xml_url, html_url)
@@ -1080,7 +1094,7 @@ async def import_profile_opml(profile_id: int, file: UploadFile = File(...)):
                     try:
                         refresh_one_feed(dict(feed))
                     except Exception as exc:
-                        with db() as conn:
+                        with write_db() as conn:
                             conn.execute("UPDATE feeds SET last_error = ? WHERE id = ?",
                                          (str(exc)[:500], feed["id"]))
             threading.Thread(target=refresh_new, daemon=True).start()
@@ -1240,7 +1254,13 @@ cat > app/static/index.html <<'FRONTENDHTML'
     <p id="status" class="status"></p>
     <section id="grid" class="grid"></section>
     <div id="filterDrawerOverlay"></div>
-    <div id="toast" class="toast hidden"></div>
+    <div id="toast" class="toast hidden">
+      <span id="toastMsg"></span>
+      <div id="toastActions" class="toastActions hidden">
+        <button id="toastReloadBtn" class="toastBtn toastBtnPrimary">Reload articles</button>
+        <button id="toastDismissBtn" class="toastBtn">Dismiss</button>
+      </div>
+    </div>
     <section id="healthPanel" class="healthPanel hidden"></section>
 
     <div id="editModal" class="modal hidden">
@@ -2009,36 +2029,76 @@ cat > app/static/index.html <<'FRONTENDHTML'
 
     function showToast(msg, durationMs = 3000) {
       const t = el("toast");
-      t.textContent = msg;
+      el("toastMsg").textContent = msg;
+      el("toastActions").classList.add("hidden");
       t.classList.remove("hidden");
       clearTimeout(showToast._timer);
-      showToast._timer = setTimeout(() => t.classList.add("hidden"), durationMs);
+      if (durationMs > 0) {
+        showToast._timer = setTimeout(() => t.classList.add("hidden"), durationMs);
+      }
+    }
+
+    function showActionToast(msg, onReload, autoDismissMs = 30000) {
+      const t = el("toast");
+      el("toastMsg").textContent = msg;
+      el("toastActions").classList.remove("hidden");
+      t.classList.remove("hidden");
+      clearTimeout(showToast._timer);
+
+      const cleanup = () => {
+        t.classList.add("hidden");
+        el("toastActions").classList.add("hidden");
+        clearTimeout(showToast._timer);
+      };
+
+      el("toastReloadBtn").onclick = () => { cleanup(); onReload(); };
+      el("toastDismissBtn").onclick = cleanup;
+
+      showToast._timer = setTimeout(cleanup, autoDismissMs);
     }
 
     el("refreshBtn").addEventListener("click", async () => {
       const btn = el("refreshBtn");
+      const mobBtn = el("refreshBtnMobile");
       if (btn.disabled) return;
       btn.disabled = true;
+      mobBtn.style.opacity = "0.4";
       try {
         await api("/api/refresh", { method: "POST" });
-        const total = 15;
-        let remaining = total;
-        showToast(`Refreshing feeds… reloading in ${remaining}s`, (total + 1) * 1000);
-        const tick = setInterval(() => {
-          remaining--;
-          if (remaining <= 0) {
-            clearInterval(tick);
-            btn.disabled = false;
-            el("toast").classList.add("hidden");
-            if (state.mode === "stories") initApplicationContext();
-          } else {
-            showToast(`Refreshing feeds… reloading in ${remaining}s`, (remaining + 1) * 1000);
-          }
-        }, 1000);
       } catch(e) {
-        showToast("Refresh failed.", 3000);
+        if (e.message && e.message.includes("429")) {
+          showToast("Refresh already in progress.", 3000);
+        } else {
+          showToast("Refresh failed.", 3000);
+        }
         btn.disabled = false;
+        mobBtn.style.opacity = "";
+        return;
       }
+
+      showToast("Refreshing feeds…", 0); // 0 = persistent until replaced
+
+      const pollInterval = setInterval(async () => {
+        try {
+          const s = await api("/api/refresh/status");
+          if (s.status === "idle") {
+            clearInterval(pollInterval);
+            btn.disabled = false;
+            mobBtn.style.opacity = "";
+            showActionToast(
+              "Refresh complete — reload articles?",
+              () => { if (state.mode === "stories") initApplicationContext(); },
+              30000
+            );
+          }
+        } catch(e) {
+          // status check failed — stop polling, re-enable button
+          clearInterval(pollInterval);
+          btn.disabled = false;
+          mobBtn.style.opacity = "";
+          showToast("Could not confirm refresh status.", 3000);
+        }
+      }, 2000);
     });
 
     el("profileSelect").addEventListener("change", e => {
@@ -2641,11 +2701,24 @@ button.secondary:hover { background: var(--bg-hover); }
 .status { font-size: 0.9rem; color: var(--text-muted); margin-bottom: 15px; padding: 0 16px; font-weight: 500; }
 .toast {
   position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
-  background: #1A5C63; color: #f0fdfa; padding: 10px 20px; border-radius: 6px;
-  font-size: 0.9rem; font-weight: 500; z-index: 9999; white-space: nowrap;
+  background: #1A5C63; color: #f0fdfa; padding: 12px 20px; border-radius: 8px;
+  font-size: 0.9rem; font-weight: 500; z-index: 9999;
   box-shadow: 0 4px 12px rgba(0,0,0,0.4);
   transition: opacity 0.3s ease;
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  min-width: 260px; max-width: 90vw; text-align: center;
 }
+.toastActions { display: flex; gap: 8px; }
+.toastActions.hidden { display: none; }
+.toastBtn {
+  all: unset; cursor: pointer; padding: 6px 14px; border-radius: 6px;
+  font-size: 0.85rem; font-weight: 600; border: 1px solid rgba(255,255,255,0.3);
+  color: #f0fdfa; background: rgba(255,255,255,0.1);
+  transition: background 0.15s;
+}
+.toastBtn:hover { background: rgba(255,255,255,0.22); }
+.toastBtnPrimary { background: rgba(255,255,255,0.25); border-color: rgba(255,255,255,0.5); }
+.toastBtnPrimary:hover { background: rgba(255,255,255,0.38); }
 .toast.hidden { display: none; }
 .hidden { display: none !important; }
 CUSTOMCSS
