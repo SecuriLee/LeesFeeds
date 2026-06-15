@@ -1444,7 +1444,13 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
       offset: 0,
       limit: 30,
       hasMore: true,
-      loadingMore: false
+      loadingMore: false,
+      // Dedup tracking (FEATURE 2): maps article 'link' -> primary item
+      // object currently rendered, when dedup is active (All Feeds view,
+      // no category/feed filter). Reset in loadItems(), grown across
+      // loadMoreItems() pages so duplicates arriving on later pages fold
+      // into the already-rendered card instead of appearing separately.
+      linkIndex: new Map()
     };
 
     const el = id => document.getElementById(id);
@@ -1473,6 +1479,79 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
       }
     }
     // -------------------------------------------------------------------------
+
+    // --- FEATURE 2: cross-feed duplicate article merging ---------------------
+    // Dedup applies only in strict "All Feeds" view (no category or feed
+    // filter active) — per spec, category-filtered views (e.g. "Sport") show
+    // each feed's copy separately.
+    function dedupActive() {
+      return !state.category && !state.feedId;
+    }
+
+    // Normalise a link for dedup-key comparison only (the original link is
+    // still used for the rendered href). Strips query string and fragment,
+    // since the same article syndicated into multiple feeds often carries
+    // different tracking parameters per-feed
+    // (e.g. ?at_medium=RSS&at_campaign=rss_sport vs ...=rss_news) while the
+    // underlying article path is identical. Article URLs use unique path
+    // segments (slugs/ids), so collapsing the query string carries
+    // negligible risk of merging genuinely different articles.
+    function normaliseLink(link) {
+      if (!link) return "";
+      try {
+        const u = new URL(link, location.href);
+        u.search = "";
+        u.hash = "";
+        return u.toString();
+      } catch {
+        return link;
+      }
+    }
+
+    // Merge a freshly-fetched chunk of items against state.linkIndex.
+    // Returns { toRender, toUpdate } where:
+    //   toRender  - new primary items that need a new card appended
+    //   toUpdate  - existing primary items whose merged state changed and
+    //               whose existing card needs to be refreshed in place
+    // Items whose link matches an existing primary are folded into that
+    // primary's _dupes array (mutates the existing primary object).
+    function mergeChunkForDedup(chunk) {
+      if (!dedupActive()) {
+        return { toRender: chunk, toUpdate: [] };
+      }
+      const toRender = [];
+      const toUpdate = [];
+      for (const item of chunk) {
+        const key = normaliseLink(item.link) || `__nolink_${item.id}`;
+        const existing = state.linkIndex.get(key);
+        if (!existing) {
+          item._dupes = [];
+          state.linkIndex.set(key, item);
+          toRender.push(item);
+        } else {
+          existing._dupes = existing._dupes || [];
+          existing._dupes.push(item);
+          // Merged is_read: unread until ALL copies are read.
+          const wasRead = existing.is_read;
+          existing.is_read = existing.is_read && item.is_read;
+          // Merged is_starred: starred if ANY copy is starred.
+          const wasStarred = existing.is_starred;
+          existing.is_starred = existing.is_starred || item.is_starred;
+          if (existing.is_read !== wasRead || existing.is_starred !== wasStarred) {
+            toUpdate.push(existing);
+          }
+        }
+      }
+      return { toRender, toUpdate };
+    }
+
+    // All item ids represented by a (possibly merged) card's item object.
+    function allIdsFor(item) {
+      const ids = [item.id];
+      if (item._dupes) ids.push(...item._dupes.map(d => d.id));
+      return ids;
+    }
+    // ---------------------------------------------------------------------
 
     async function api(url, opts = {}) {
       const r = await fetch(url, { headers: { "Content-Type": "application/json" }, ...opts });
@@ -1527,7 +1606,11 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
     function updateStatusLabel() {
       const statusEl = el("status");
       if (!statusEl) return;
-      if (!state.items.length) {
+      // Use rendered card count rather than state.items.length: with dedup
+      // active, state.items (raw, pre-merge) can be non-empty while no
+      // primary cards are rendered (all loaded items were duplicates of
+      // already-shown articles).
+      if (el("grid").children.length === 0) {
         statusEl.textContent = state.unreadOnly ?
           "All caught up — no unread stories." : "No stories matched your filters.";
       } else {
@@ -1559,6 +1642,7 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
       state.mode = "stories";
       state.offset = 0;
       state.hasMore = true;
+      state.linkIndex = new Map();
       el("grid").classList.remove("hidden");
       el("healthPanel").classList.add("hidden");
       document.querySelector(".controls").classList.remove("hidden");
@@ -1577,15 +1661,18 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
       p.set("offset", state.offset.toString());
 
       el("grid").classList.add("loading");
+      let fetched = [];
       try {
-        state.items = await api(`/api/items?${p}`);
-        if (state.items.length < state.limit) {
+        fetched = await api(`/api/items?${p}`);
+        if (fetched.length < state.limit) {
           state.hasMore = false;
         }
       } catch(e) { console.error(e); }
       el("grid").classList.remove("loading");
       el("grid").innerHTML = "";
-      renderItems(state.items);
+      state.items = fetched;
+      const { toRender } = mergeChunkForDedup(fetched);
+      renderItems(toRender);
       updateStatusLabel();
       await loadMeta();
     }
@@ -1612,7 +1699,14 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
         }
         if (nextChunk.length > 0) {
           state.items = state.items.concat(nextChunk);
-          renderItems(nextChunk);
+          const { toRender, toUpdate } = mergeChunkForDedup(nextChunk);
+          renderItems(toRender);
+          // A duplicate arrived on this page for a card rendered on an
+          // earlier page — refresh that card's read/star state in place.
+          for (const item of toUpdate) {
+            const card = el("grid").querySelector(`article[data-primary-id="${item.id}"]`);
+            if (card) refreshCardState(item, card);
+          }
         }
       } catch(e) { console.error(e); }
       state.loadingMore = false;
@@ -1653,6 +1747,7 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
       chunk.forEach(item => {
         const card = document.createElement("article");
         card.className = `card ${item.is_read ? 'read' : 'unread'}`;
+        card.dataset.primaryId = item.id;
 
         if (item.image_url) {
           const wrap = document.createElement("div");
@@ -1674,10 +1769,19 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
         // safeHref() ensures only http/https URLs reach the anchor href,
         // blocking javascript:, data:, vbscript: and other dangerous schemes
         // for items already stored in the DB before the backend fix was applied.
+        // --- FEATURE 2: duplicate count badge ---------------------------------
+        // When this card represents multiple feeds' copies of the same
+        // article (dedup active), show how many additional sources carried it.
+        const dupeCount = (item._dupes || []).length;
+        const dupeBadge = dupeCount > 0
+          ? `<span class="dupeTag" title="Also seen in ${dupeCount} other feed${dupeCount === 1 ? '' : 's'}">+${dupeCount}</span>`
+          : '';
+        // -----------------------------------------------------------------------
         body.innerHTML = `
           <div class="cardMeta">
             <span class="categoryTag">${esc(item.category)}</span>
             <span class="feedTitleTag">${esc(item.feed_title)}</span>
+            ${dupeBadge}
             ${item.author ? `<span class="authorTag">by ${esc(item.author)}</span>` : ''}
             <span class="dateTag" title="Published">${fmtDate(item.published)}</span>
             <span class="fetchedTag" title="Fetched ${fmtDate(item.fetched_at)}">↓ ${fmtDate(item.fetched_at)}</span>
@@ -1701,50 +1805,133 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
       });
     }
 
+    // Re-render a card's read/star indicators in place after its underlying
+    // (merged) item state changes — used when a duplicate arrives via
+    // infinite scroll and changes the merged is_read/is_starred state of an
+    // already-rendered card (FEATURE 2).
+    function refreshCardState(item, card) {
+      card.className = `card ${item.is_read ? 'read' : 'unread'}`;
+      const readBtn = card.querySelector(".readToggleBtn");
+      if (readBtn) readBtn.textContent = item.is_read ? '🗙' : '✔';
+      const starBtn = card.querySelector(".starBtn");
+      if (starBtn) starBtn.textContent = item.is_starred ? '★' : '☆';
+      const dupeCount = (item._dupes || []).length;
+      const meta = card.querySelector(".cardMeta");
+      if (meta) {
+        const existingBadge = meta.querySelector(".dupeTag");
+        if (dupeCount > 0 && !existingBadge) {
+          const badge = document.createElement("span");
+          badge.className = "dupeTag";
+          badge.title = `Also seen in ${dupeCount} other feed${dupeCount === 1 ? '' : 's'}`;
+          badge.textContent = `+${dupeCount}`;
+          meta.insertBefore(badge, meta.children[2] || null);
+        } else if (existingBadge) {
+          existingBadge.title = `Also seen in ${dupeCount} other feed${dupeCount === 1 ? '' : 's'}`;
+          existingBadge.textContent = `+${dupeCount}`;
+        }
+      }
+      // If this card just became fully read while unreadOnly is active,
+      // remove it the same way toggleRead does.
+      if (state.unreadOnly && item.is_read) {
+        card.remove();
+        state.items = state.items.filter(i => !allIdsFor(item).includes(i.id));
+        updateStatusLabel();
+      }
+    }
+
+    // --- FEATURE 1: keep feed-selector unread counts in sync ----------------
+    // loadMeta() refreshes category counts/totals; loadFeeds() refreshes the
+    // per-feed unread counts shown in the feed <select> (and re-renders it).
+    // Call both together after any action that changes read/star state.
+    async function refreshCounts() {
+      await Promise.all([loadMeta(), loadFeeds()]);
+    }
+    // ---------------------------------------------------------------------
+
+    // --- BACKFILL: keep the view populated after read-state changes ---------
+    // Marking items read removes their cards (when unreadOnly is active),
+    // which can leave the view sparse or empty even though more matching
+    // items exist server-side (state.hasMore). Without this, the user sees
+    // "All caught up" after mark-all-read even when hundreds of unread
+    // items remain unfetched. Pulls additional pages until either the view
+    // has at least BACKFILL_THRESHOLD cards or the server is exhausted.
+    //
+    // Threshold is lower than state.limit (30) so single-item read-toggles
+    // near the end of a page don't trigger an extra fetch on every click —
+    // only once the view gets genuinely sparse, or after mark-all-read
+    // (which can empty the view in one go).
+    //
+    // Checks rendered card count (not state.items.length) because with
+    // dedup active a backfilled page can consist entirely of duplicates of
+    // already-removed articles, growing state.items without adding visible
+    // cards.
+    const BACKFILL_THRESHOLD = 10;
+    async function maybeBackfill() {
+      while (el("grid").children.length < BACKFILL_THRESHOLD && state.hasMore && !state.loadingMore && state.mode === "stories") {
+        await loadMoreItems();
+      }
+      updateStatusLabel();
+    }
+    // ---------------------------------------------------------------------
+
     function markReadInstant(item, card) {
       item.is_read = true;
+      const ids = allIdsFor(item);
+      let removed = false;
       if (state.unreadOnly) {
         card.remove();
-        state.items = state.items.filter(i => i.id !== item.id);
+        state.items = state.items.filter(i => !ids.includes(i.id));
+        removed = true;
         updateStatusLabel();
       } else {
         card.className = "card read";
         const btn = card.querySelector(".readToggleBtn");
         if (btn) btn.textContent = '🗙';
       }
-      api(`/api/items/${item.id}`, { method: "PATCH", body: JSON.stringify({ is_read: true }) })
-        .then(() => loadMeta())
+      Promise.all(ids.map(id =>
+        api(`/api/items/${id}`, { method: "PATCH", body: JSON.stringify({ is_read: true }) })
+      ))
+        .then(() => {
+          refreshCounts();
+          if (removed) return maybeBackfill();
+        })
         .catch(e => console.error(e));
     }
 
     async function toggleRead(item, card) {
       const nextState = !item.is_read;
       item.is_read = nextState;
+      const ids = allIdsFor(item);
+      let removed = false;
       if (state.unreadOnly && nextState) {
         card.remove();
-        state.items = state.items.filter(i => i.id !== item.id);
+        state.items = state.items.filter(i => !ids.includes(i.id));
+        removed = true;
         updateStatusLabel();
       } else {
         card.className = `card ${nextState ? 'read' : 'unread'}`;
         card.querySelector(".readToggleBtn").textContent = nextState ? '🗙' : '✔';
       }
       try {
-        await api(`/api/items/${item.id}`, { method: "PATCH", body: JSON.stringify({ is_read: nextState }) });
-        loadMeta();
+        await Promise.all(ids.map(id =>
+          api(`/api/items/${id}`, { method: "PATCH", body: JSON.stringify({ is_read: nextState }) })
+        ));
+        refreshCounts();
+        if (removed) await maybeBackfill();
       } catch (e) { console.error(e); }
     }
 
     async function toggleStar(item, card) {
       const nextState = !item.is_starred;
+      const ids = allIdsFor(item);
       try {
-        const updated = await api(`/api/items/${item.id}`, {
-          method: "PATCH",
-          body: JSON.stringify({ is_starred: nextState })
-        });
-        item.is_starred = updated.is_starred;
+        const results = await Promise.all(ids.map(id =>
+          api(`/api/items/${id}`, { method: "PATCH", body: JSON.stringify({ is_starred: nextState }) })
+        ));
+        item.is_starred = results[0].is_starred;
         const btn = card.querySelector(".starBtn");
         btn.textContent = item.is_starred ? '★' : '☆';
-        await loadMeta();
+        await refreshCounts();
       } catch (e) { console.error(e); }
     }
 
@@ -2183,14 +2370,17 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
       });
       const nowRead = unread.filter(i => i.is_read);
       const nowReadIds = new Set(nowRead.map(i => i.id));
+      let removed = false;
       if (state.unreadOnly) {
         el("grid").querySelectorAll("article.card.unread").forEach(c => c.remove());
         state.items = state.items.filter(i => !nowReadIds.has(i.id));
+        removed = true;
       } else {
         el("grid").querySelectorAll("article.card.unread").forEach(c => c.classList.replace("unread", "read"));
       }
       updateStatusLabel();
-      loadMeta();
+      refreshCounts();
+      if (removed) await maybeBackfill();
     });
 
     function showToast(msg, durationMs = 3000) {
@@ -2370,6 +2560,7 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
   </script>
 </body>
 </html>
+
 FRONTENDHTML
 
 # ===================================================================
@@ -2698,6 +2889,8 @@ button.secondary:hover { background: var(--bg-hover); }
 .categoryTag { background: var(--tag-bg); color: var(--tag-color); padding: 2px 6px; border-radius: 4px; font-weight: 600; }
 .feedTitleTag { color: var(--text-main); font-weight: 600; }
 .fetchedTag { color: var(--text-muted); font-size: 0.7rem; font-style: italic; }
+/* FEATURE 2: badge showing an article was also seen in other feeds (dedup) */
+.dupeTag { background: var(--bg-hover); color: var(--text-muted); padding: 2px 6px; border-radius: 4px; font-weight: 600; font-size: 0.7rem; }
 
 .cardTitle {
   font-size: 1.05rem;
