@@ -1345,6 +1345,18 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
         <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
       </svg>
     </button>
+    <button id="densityToggleBtnMobile" class="mobileBarBtn" aria-label="Toggle compact view">
+      <svg class="iconComfortable" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="4" width="18" height="16" rx="2"/>
+        <line x1="3" y1="11" x2="21" y2="11"/>
+      </svg>
+      <svg class="iconCompact" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="4" width="5" height="5" rx="1"/>
+        <line x1="10" y1="6.5" x2="21" y2="6.5"/>
+        <rect x="3" y="14" width="5" height="5" rx="1"/>
+        <line x1="10" y1="16.5" x2="21" y2="16.5"/>
+      </svg>
+    </button>
     <button id="markReadBtnMobile" class="mobileBarBtn" aria-label="Mark shown read">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
         <polyline points="20 6 9 17 4 12"/>
@@ -2343,6 +2355,31 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
       el("themeToggleBtnMobile").addEventListener("click", toggle);
     })();
 
+    // --- DENSITY TOGGLE: compact card layout for phone widths ---------------
+    // Mobile-only (<767px) alternative card layout — small thumbnail beside
+    // a 1-line title + 1-line teaser instead of the full-width image and
+    // multi-line card. Pure CSS reflow of the same renderItems() markup via
+    // [data-density="compact"] selectors, scoped under the existing mobile
+    // breakpoint — desktop is unaffected regardless of this setting.
+    (function initDensity() {
+      const btn = el("densityToggleBtnMobile");
+      if (!btn) return;
+      const apply = (density) => {
+        if (density === "compact") {
+          document.documentElement.setAttribute("data-density", "compact");
+        } else {
+          document.documentElement.removeAttribute("data-density");
+        }
+      };
+      apply(localStorage.getItem("lf-density") || "comfortable");
+      btn.addEventListener("click", () => {
+        const next = document.documentElement.getAttribute("data-density") === "compact" ? "comfortable" : "compact";
+        localStorage.setItem("lf-density", next);
+        apply(next);
+      });
+    })();
+    // ---------------------------------------------------------------------
+
     el("homeBtnMobile").addEventListener("click", () => {
       state.category = ""; state.feedId = ""; state.q = "";
       el("category").value = ""; el("feed").value = ""; el("search").value = "";
@@ -2739,6 +2776,13 @@ body {
   [data-theme="light"] .iconMoon { display: block; }
   [data-theme="light"] .iconSun  { display: none; }
 
+  /* Density toggle icon: show "switch to compact" (rows icon) by default,
+     "switch to comfortable" (card icon) once compact is active. */
+  .iconCompact     { display: none; }
+  .iconComfortable { display: block; }
+  [data-density="compact"] .iconCompact     { display: block; }
+  [data-density="compact"] .iconComfortable { display: none; }
+
   main { padding-top: 0; }
 }
 
@@ -2938,6 +2982,104 @@ button.secondary:hover { background: var(--bg-hover); }
 }
 .iconAction:hover { color: var(--text-main); }
 .starBtn { color: #eab308 !important; }
+
+/* ----------------------------------------------------------------------
+   DENSITY: compact card layout (mobile only, <767px)
+   Pure CSS reflow of the SAME markup renderItems() produces — no JS
+   branching. Thumbnail moves beside the text block instead of above it;
+   title and teaser clamp to a single line each; star/read actions fold
+   into the meta row instead of a dedicated footer row. Touch targets stay
+   at the existing 44px minimum (.iconAction is untouched).
+   Scoped entirely inside @media (max-width: 767px) — desktop/tablet
+   layouts are unaffected by this setting regardless of data-density.
+---------------------------------------------------------------------- */
+@media (max-width: 767px) {
+  [data-density="compact"] .grid {
+    gap: 1px;
+    padding: 0;
+  }
+
+  [data-density="compact"] .card {
+    display: grid;
+    grid-template-columns: 56px 1fr;
+    column-gap: 10px;
+    padding: 8px 12px;
+    border-left: none;
+    border-radius: 0;
+    border-bottom: 1px solid var(--border-color);
+  }
+  [data-density="compact"] .card.unread {
+    border-left: 3px solid var(--primary);
+    padding-left: 9px;
+  }
+
+  [data-density="compact"] .cardImage,
+  [data-density="compact"] .cardImagePlaceholder {
+    width: 56px;
+    height: 56px;
+    border-radius: 6px;
+    flex-shrink: 0;
+    align-self: start;
+  }
+  [data-density="compact"] .cardImage img { width: 56px; height: 56px; }
+  [data-density="compact"] .cardImagePlaceholder span { font-size: 1rem; }
+
+  [data-density="compact"] .cardBody {
+    padding: 0;
+    min-height: 56px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 2px;
+    position: relative;
+    padding-right: 76px; /* reserve space for the absolutely-positioned actions */
+  }
+
+  [data-density="compact"] .cardTitle {
+    font-size: 0.92rem;
+    margin-bottom: 0;
+    -webkit-line-clamp: 1;
+  }
+
+  [data-density="compact"] .cardTeaser {
+    font-size: 0.78rem;
+    margin-bottom: 0;
+    -webkit-line-clamp: 1;
+    flex: none;
+  }
+
+  /* .cardSummaryActions is a grandchild of .card (nested inside
+     .cardBody), so it can't be grid-placed against .card's own grid
+     tracks. Position it absolutely within .cardBody instead, vertically
+     centered beside the thumbnail. No DOM changes — same elements,
+     repositioned via CSS only. */
+  [data-density="compact"] .cardMeta {
+    margin-bottom: 0;
+    font-size: 0.68rem;
+    order: 3;
+  }
+  [data-density="compact"] .fetchedTag,
+  [data-density="compact"] .authorTag {
+    display: none;
+  }
+
+  [data-density="compact"] .cardSummaryActions {
+    border-top: none;
+    margin-top: 0;
+    padding-top: 0;
+    gap: 4px;
+    position: absolute;
+    top: 50%;
+    right: 0;
+    transform: translateY(-50%);
+  }
+  [data-density="compact"] .iconAction {
+    min-height: 36px;
+    min-width: 36px;
+    font-size: 1.05rem;
+  }
+}
+/* ------------------------------------------------------------------- */
 
 .healthPanel { padding: 16px; background: var(--bg-card); margin: 16px; border-radius: var(--radius); border: 1px solid var(--border-color); overflow-x: auto; }
 .healthTable { width: 100%; border-collapse: collapse; font-size: 0.9rem; color:var(--text-main); table-layout: fixed; }
