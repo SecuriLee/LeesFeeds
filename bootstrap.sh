@@ -1612,7 +1612,7 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
         <span style="font-style:italic; color:var(--text-muted);">${filterLabel}</span>
       `;
       const mob = el("statsMobile");
-      if (mob) mob.textContent = `✉️ ${m.unread_count}${m.error_count ? `  ⚠️${m.error_count}` : ""}`;
+      if (mob) mob.textContent = m.error_count ? `⚠️ ${m.error_count}` : "";
     }
 
     function updateStatusLabel() {
@@ -2781,10 +2781,11 @@ body {
 [data-theme="light"] .iconMoon { display: block; }
 [data-theme="light"] .iconSun  { display: none; }
 
-.iconCompact     { display: none; }
-.iconComfortable { display: block; }
-[data-density="compact"] .iconCompact     { display: block; }
-[data-density="compact"] .iconComfortable { display: none; }
+/* Icon shows the destination state, not the current state */
+.iconCompact     { display: block; }
+.iconComfortable { display: none; }
+[data-density="compact"] .iconCompact     { display: none; }
+[data-density="compact"] .iconComfortable { display: block; }
 
 .heroIconBtn {
   display: inline-flex;
@@ -2867,6 +2868,13 @@ button.secondary:hover { background: var(--bg-hover); }
 }
 
 @media (min-width: 640px) { .grid { grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); } }
+
+/* Tablet range (640–1023px): reduce card image height ~30% so tiles
+   don't loom too large between the mobile and full desktop breakpoints. */
+@media (min-width: 640px) and (max-width: 1023px) {
+  .cardImage img,
+  .cardImagePlaceholder { height: 112px; }
+}
 
 .card {
   display: flex;
