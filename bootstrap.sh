@@ -2993,13 +2993,14 @@ button.secondary:hover { background: var(--bg-hover); }
 
 /* ----------------------------------------------------------------------
    DENSITY: compact card layout (mobile only, <767px)
-   Pure CSS reflow of the SAME markup renderItems() produces — no JS
-   branching. Thumbnail moves beside the text block instead of above it;
-   title and teaser clamp to a single line each; star/read actions fold
-   into the meta row instead of a dedicated footer row. Touch targets stay
-   at the existing 44px minimum (.iconAction is untouched).
-   Scoped entirely inside @media (max-width: 767px) — desktop/tablet
-   layouts are unaffected by this setting regardless of data-density.
+   Grid layout: 56px thumb | 1fr text | 68px actions
+   Row 1: thumb (spans rows 1-2) | title  | actions (spans rows 1-2)
+   Row 2:                        | meta   |
+   Row 3: teaser spans all three columns (flows under the thumbnail)
+
+   .cardBody is set to display:contents so its children become direct
+   grid children and cardTeaser can be placed on its own spanning row.
+   No markup changes — pure CSS reflow.
 ---------------------------------------------------------------------- */
 @media (max-width: 767px) {
   [data-density="compact"] .grid {
@@ -3009,9 +3010,12 @@ button.secondary:hover { background: var(--bg-hover); }
 
   [data-density="compact"] .card {
     display: grid;
-    grid-template-columns: 56px 1fr;
-    column-gap: 10px;
+    grid-template-columns: 56px 1fr 68px;
+    grid-template-rows: auto auto auto;
+    column-gap: 8px;
+    row-gap: 2px;
     padding: 8px 12px;
+    height: auto;
     border-left: none;
     border-radius: 0;
     border-bottom: 1px solid var(--border-color);
@@ -3023,65 +3027,73 @@ button.secondary:hover { background: var(--bg-hover); }
 
   [data-density="compact"] .cardImage,
   [data-density="compact"] .cardImagePlaceholder {
+    grid-column: 1;
+    grid-row: 1 / 3;
     width: 56px;
     height: 56px;
     border-radius: 6px;
-    flex-shrink: 0;
     align-self: start;
   }
   [data-density="compact"] .cardImage img { width: 56px; height: 56px; }
   [data-density="compact"] .cardImagePlaceholder span { font-size: 1rem; }
 
+  /* Dissolve cardBody into the card grid — children become direct grid
+     items so cardTeaser can span the full card width on its own row. */
   [data-density="compact"] .cardBody {
-    padding: 0;
-    min-height: 56px;
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-    position: relative;
-    padding-right: 76px; /* reserve space for the absolutely-positioned actions */
+    display: contents;
   }
 
-  /* Visual order: title → meta (category/feed) → teaser */
   [data-density="compact"] .cardTitle {
+    grid-column: 2;
+    grid-row: 1;
+    align-self: end;
     font-size: 0.92rem;
     margin-bottom: 0;
     -webkit-line-clamp: 2;
-    order: 1;
+    order: unset;
   }
 
-  [data-density="compact"] .cardTeaser {
-    font-size: 0.78rem;
-    margin-bottom: 0;
-    -webkit-line-clamp: 2;
-    flex: none;
-    order: 3;
-  }
-
-  /* .cardSummaryActions is a grandchild of .card (nested inside
-     .cardBody), so it can't be grid-placed against .card's own grid
-     tracks. Position it absolutely within .cardBody instead, vertically
-     centered beside the thumbnail. No DOM changes — same elements,
-     repositioned via CSS only. */
   [data-density="compact"] .cardMeta {
+    grid-column: 2;
+    grid-row: 2;
+    align-self: start;
     margin-bottom: 0;
     font-size: 0.68rem;
-    order: 2;
+    order: unset;
   }
   [data-density="compact"] .fetchedTag,
   [data-density="compact"] .authorTag {
     display: none;
   }
 
+  /* Teaser spans all columns — flows under both thumb and text */
+  [data-density="compact"] .cardTeaser {
+    grid-column: 1 / -1;
+    grid-row: 3;
+    font-size: 0.78rem;
+    margin: 0;
+    margin-top: 4px;
+    padding-top: 5px;
+    border-top: 1px solid var(--border-color);
+    -webkit-line-clamp: 2;
+    flex: none;
+    order: unset;
+  }
+
+  /* Actions column: centered beside the thumb+text rows */
   [data-density="compact"] .cardSummaryActions {
+    grid-column: 3;
+    grid-row: 1 / 3;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    position: static;
+    transform: none;
     border-top: none;
     margin-top: 0;
     padding-top: 0;
-    gap: 4px;
-    position: absolute;
-    top: 50%;
-    right: 0;
-    transform: translateY(-50%);
   }
   [data-density="compact"] .iconAction {
     min-height: 36px;
