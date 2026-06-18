@@ -3037,23 +3037,25 @@ button.secondary:hover { background: var(--bg-hover); }
     min-height: 56px;
     display: flex;
     flex-direction: column;
-    justify-content: center;
-    gap: 2px;
+    gap: 3px;
     position: relative;
     padding-right: 76px; /* reserve space for the absolutely-positioned actions */
   }
 
+  /* Visual order: title → meta (category/feed) → teaser */
   [data-density="compact"] .cardTitle {
     font-size: 0.92rem;
     margin-bottom: 0;
     -webkit-line-clamp: 2;
+    order: 1;
   }
 
   [data-density="compact"] .cardTeaser {
     font-size: 0.78rem;
     margin-bottom: 0;
-    -webkit-line-clamp: 1;
+    -webkit-line-clamp: 2;
     flex: none;
+    order: 3;
   }
 
   /* .cardSummaryActions is a grandchild of .card (nested inside
@@ -3064,7 +3066,7 @@ button.secondary:hover { background: var(--bg-hover); }
   [data-density="compact"] .cardMeta {
     margin-bottom: 0;
     font-size: 0.68rem;
-    order: 3;
+    order: 2;
   }
   [data-density="compact"] .fetchedTag,
   [data-density="compact"] .authorTag {
