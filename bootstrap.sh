@@ -2724,67 +2724,67 @@ body {
     gap: 2px;
   }
 
-  .mobileBarBrand {
-    all: unset;
-    display: flex;
-    align-items: center;
-    justify-content: flex-start;
-    padding: 0 4px 0 8px;
-    height: 44px;
-    color: var(--primary);
-    cursor: pointer;
-    flex-shrink: 0;
-    font-size: 1.05rem;
-    font-weight: 800;
-    letter-spacing: -0.01em;
-    white-space: nowrap;
-  }
-
-  .mobileBarStats {
-    all: unset;
-    font-size: 0.72rem;
-    color: var(--text-muted);
-    display: flex;
-    gap: 8px;
-    align-items: center;
-    cursor: pointer;
-    padding: 0 4px;
-    white-space: nowrap;
-  }
-
-  .mobileBarSpacer { flex: 1; }
-
-  .mobileBarBtn {
-    all: unset;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 44px;
-    height: 44px;
-    color: var(--text-muted);
-    cursor: pointer;
-    border-radius: var(--radius);
-    flex-shrink: 0;
-    transition: color 0.15s, background 0.15s;
-  }
-  .mobileBarBtn:active { background: var(--border-color); color: var(--text-main); }
-  .mobileBarBtn svg { width: 22px; height: 22px; }
-  .mobileBarBtn.active { color: var(--primary); }
-
-  .iconMoon { display: none; }
-  .iconSun  { display: block; }
-  [data-theme="light"] .iconMoon { display: block; }
-  [data-theme="light"] .iconSun  { display: none; }
-
-  /* Density toggle icon: show "switch to compact" (rows icon) by default,
-     "switch to comfortable" (card icon) once compact is active. */
-  .iconCompact     { display: none; }
-  .iconComfortable { display: block; }
-  [data-density="compact"] .iconCompact     { display: block; }
-  [data-density="compact"] .iconComfortable { display: none; }
-
   main { padding-top: 0; }
 }
+
+/* mobileBar child styles live outside the breakpoint so the phone-landscape
+   rule below can enable the bar without duplicating all these declarations. */
+.mobileBarBrand {
+  all: unset;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 0 4px 0 8px;
+  height: 44px;
+  color: var(--primary);
+  cursor: pointer;
+  flex-shrink: 0;
+  font-size: 1.05rem;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+.mobileBarStats {
+  all: unset;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  cursor: pointer;
+  padding: 0 4px;
+  white-space: nowrap;
+}
+
+.mobileBarSpacer { flex: 1; }
+
+.mobileBarBtn {
+  all: unset;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: var(--radius);
+  flex-shrink: 0;
+  transition: color 0.15s, background 0.15s;
+}
+.mobileBarBtn:active { background: var(--border-color); color: var(--text-main); }
+.mobileBarBtn svg { width: 22px; height: 22px; }
+.mobileBarBtn.active { color: var(--primary); }
+
+.iconMoon { display: none; }
+.iconSun  { display: block; }
+[data-theme="light"] .iconMoon { display: block; }
+[data-theme="light"] .iconSun  { display: none; }
+
+.iconCompact     { display: none; }
+.iconComfortable { display: block; }
+[data-density="compact"] .iconCompact     { display: block; }
+[data-density="compact"] .iconComfortable { display: none; }
 
 .heroIconBtn {
   display: inline-flex;
@@ -3038,7 +3038,7 @@ button.secondary:hover { background: var(--bg-hover); }
   [data-density="compact"] .cardTitle {
     font-size: 0.92rem;
     margin-bottom: 0;
-    -webkit-line-clamp: 1;
+    -webkit-line-clamp: 2;
   }
 
   [data-density="compact"] .cardTeaser {
@@ -3179,9 +3179,56 @@ button.secondary:hover { background: var(--bg-hover); }
   }
 }
 
-@media (min-width: 768px) {
+@media (min-width: 768px) and (min-height: 501px) {
   .filterDrawer { display: none !important; }
   #filterDrawerOverlay { display: none !important; }
+}
+
+/* Phone landscape (e.g. iPhone in landscape): viewport is wider than 767px
+   but too short (~393px) for the desktop inline-controls layout. Use the
+   same mobile-bar + slide-up drawer pattern as portrait mobile. The
+   max-height: 500px threshold sits between phone landscape (~390-430px) and
+   tablet landscape (~768px+), so iPad Air is unaffected. */
+@media (orientation: landscape) and (max-height: 500px) {
+  .hero .heroTitle { display: none; }
+  .hero .heroActions { display: none; }
+  .hero { padding: 0; min-height: 0; border-bottom: none; }
+  .mobileBar {
+    display: flex;
+    align-items: center;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    background: var(--bg-card);
+    border-bottom: 1px solid var(--border-color);
+    padding: 0 8px;
+    height: 52px;
+    gap: 2px;
+  }
+  .controls { display: none !important; }
+  .filterToggleBtn { display: inline-flex !important; align-items: center; gap: 6px; }
+  main { padding-top: 0; }
+  .filterDrawer {
+    position: fixed;
+    bottom: 0; left: 0; right: 0;
+    z-index: 200;
+    background: var(--bg-card);
+    border-top: 2px solid #1A5C63;
+    border-radius: 14px 14px 0 0;
+    transform: translateY(100%);
+    transition: transform 0.28s cubic-bezier(0.32, 0.72, 0, 1);
+    max-height: 80vh;
+    overflow-y: auto;
+  }
+  .filterDrawer.open { transform: translateY(0); }
+  #filterDrawerOverlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 199;
+    background: rgba(0,0,0,0.45);
+  }
+  #filterDrawerOverlay.open { display: block; }
 }
 
 .status { font-size: 0.9rem; color: var(--text-muted); margin-bottom: 15px; padding: 0 16px; font-weight: 500; }
