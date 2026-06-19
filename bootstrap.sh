@@ -2422,6 +2422,7 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
         // request e.g. offset=60 of the *new* unread set, silently skipping
         // items 0-59 that were never shown. loadItems() resets the cursor.
         await loadItems();
+        refreshCounts(); // loadItems() calls loadMeta() but not loadFeeds(); need both to update feed-selector unread counts
       } else {
         updateStatusLabel();
         refreshCounts();
