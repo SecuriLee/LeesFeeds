@@ -2416,9 +2416,16 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
       } else {
         el("grid").querySelectorAll("article.card.unread").forEach(c => c.classList.replace("unread", "read"));
       }
-      updateStatusLabel();
-      refreshCounts();
-      if (removed) await maybeBackfill();
+      if (removed) {
+        // Re-fetch from offset 0 so the next page of unread items isn't
+        // skipped. maybeBackfill() would increment the stale offset and
+        // request e.g. offset=60 of the *new* unread set, silently skipping
+        // items 0-59 that were never shown. loadItems() resets the cursor.
+        await loadItems();
+      } else {
+        updateStatusLabel();
+        refreshCounts();
+      }
       showToast(`Marked ${nowRead.length} item${nowRead.length !== 1 ? 's' : ''} read.`);
     });
 
