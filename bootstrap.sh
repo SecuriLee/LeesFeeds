@@ -758,6 +758,54 @@ def extract_image(entry, link: str) -> Optional[str]:
         pass
     return None
 
+def _normalise_link(link: str) -> str:
+    """Strip query string and fragment for duplicate-URL detection only."""
+    if not link:
+        return ""
+    try:
+        p = urlparse(link)
+        return p._replace(query="", fragment="").geturl().rstrip("/")
+    except Exception:
+        return link
+
+def _dedup_feed(conn, feed_id: int) -> int:
+    """Remove duplicate items within a feed that share the same normalised
+    link (i.e. identical path, differing only in tracking query params).
+    Keeps the best copy: starred > unread > most-recent published > lowest id.
+    Starred items are never deleted even when duplicates exist.
+    Returns the number of rows deleted."""
+    items = conn.execute("""
+        SELECT id, link, is_starred, is_read, published
+        FROM items
+        WHERE feed_id = ? AND link IS NOT NULL AND link != ''
+    """, (feed_id,)).fetchall()
+
+    groups: dict = {}
+    for item in items:
+        key = _normalise_link(item["link"])
+        if key:
+            groups.setdefault(key, []).append(item)
+
+    removed = 0
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        group.sort(key=lambda i: (
+            i["is_starred"],
+            not i["is_read"],
+            i["published"] or "",
+            -i["id"],
+        ), reverse=True)
+        delete_ids = [i["id"] for i in group[1:] if not i["is_starred"]]
+        if not delete_ids:
+            continue
+        conn.execute(
+            f"DELETE FROM items WHERE id IN ({','.join('?'*len(delete_ids))})",
+            delete_ids
+        )
+        removed += len(delete_ids)
+    return removed
+
 def refresh_one_feed(feed) -> int:
     kwargs = {}
     if feed["etag"]:          kwargs["etag"]     = feed["etag"]
@@ -815,6 +863,7 @@ def refresh_one_feed(feed) -> int:
             except sqlite3.IntegrityError:
                 pass
 
+        _dedup_feed(conn, feed["id"])
         conn.execute(
             "UPDATE feeds SET last_checked = ?, last_error = ?, etag = ?, last_modified = ? WHERE id = ?",
             (now, error, new_etag, new_last_modified, feed["id"])
@@ -1006,11 +1055,23 @@ def refresh_feed(feed_id: int):
     threading.Thread(target=refresh_one_feed, args=(dict(row),), daemon=True).start()
     return {"status": "started", "feed_id": feed_id, "refreshed_at": utc_now()}
 
+def _normalise_link(link: str) -> str:
+    """Strip query string and fragment for duplicate-detection only."""
+    if not link:
+        return ""
+    try:
+        p = urlparse(link)
+        return p._replace(query="", fragment="").geturl().rstrip("/")
+    except Exception:
+        return link
+
 @app.post("/api/prune")
 def prune(profile_id: int = 1):
     now = utc_now()
     deleted = 0
+    dupes = 0
     with write_db() as conn:
+        # Age-based pruning
         feeds_with_age = conn.execute("""
             SELECT id, max_age_days FROM feeds
             WHERE profile_id = ? AND max_age_days IS NOT NULL AND max_age_days > 0
@@ -1032,8 +1093,17 @@ def prune(profile_id: int = 1):
               )
         """, (profile_id,))
         deleted += cur.rowcount
+
+        # URL deduplication — same logic as _dedup_feed() run on each refresh,
+        # but run here across all feeds to catch duplicates that pre-date the fix.
+        all_feeds = conn.execute(
+            "SELECT id FROM feeds WHERE profile_id = ?", (profile_id,)
+        ).fetchall()
+        for feed in all_feeds:
+            dupes += _dedup_feed(conn, feed["id"])
+
         conn.execute("VACUUM")
-    return {"status": "ok", "deleted": deleted, "pruned_at": now}
+    return {"status": "ok", "deleted": deleted, "dupes_removed": dupes, "pruned_at": now}
 
 @app.get("/api/items")
 def items(
