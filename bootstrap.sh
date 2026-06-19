@@ -2594,7 +2594,12 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
     el("modalCancelBtn").addEventListener("click", closeModal);
 
     window.addEventListener("scroll", () => {
-      if ((window.innerHeight + window.scrollY) >= document.documentElement.scrollHeight - 150) {
+      // Guard: scrollY > 0 prevents the programmatic window.scrollTo(0,0)
+      // in loadItems() from firing this handler. On mobile the page can be
+      // shorter than the viewport immediately after a fresh load, making the
+      // threshold condition true at scrollY=0 and auto-consuming extra pages.
+      if (window.scrollY > 0 &&
+          (window.innerHeight + window.scrollY) >= document.documentElement.scrollHeight - 150) {
         loadMoreItems();
       }
     });
