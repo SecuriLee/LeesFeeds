@@ -2397,6 +2397,7 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
     el("markReadBtn").addEventListener("click", async () => {
       const unread = state.items.filter(i => !i.is_read);
       if (!unread.length) return;
+      showToast("Marking items read…", 0);
       const results = await Promise.allSettled(
         unread.map(i => api(`/api/items/${i.id}`, { method: "PATCH", body: JSON.stringify({ is_read: true }) }))
       );
@@ -2418,6 +2419,7 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
       updateStatusLabel();
       refreshCounts();
       if (removed) await maybeBackfill();
+      showToast(`Marked ${nowRead.length} item${nowRead.length !== 1 ? 's' : ''} read.`);
     });
 
     function showToast(msg, durationMs = 3000) {
