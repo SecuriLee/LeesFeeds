@@ -830,6 +830,8 @@ def refresh_one_feed(feed) -> int:
             "NonXMLContentType",
             "UndeclaredNamespace",
             "ThingsNobodyCaresAbout",
+            "SAXParseException",
+            "ParseError",
         }
         if exc_name not in NON_FATAL:
             error = str(exc)[:500]
