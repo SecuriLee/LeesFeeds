@@ -3243,14 +3243,15 @@ button.secondary:hover { background: var(--bg-hover); }
 .healthTable th, .healthTable td { padding: 10px 12px; border-bottom: 1px solid #334155; vertical-align: top; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .healthTable th { background: var(--bg-app); text-align: left; font-weight: 600; font-size: 0.78rem; color: var(--text-muted); letter-spacing: 0.03em; white-space: nowrap; }
 .healthTable td:first-child { white-space: normal; }
-.healthTable col.col-title    { width: 28%; }
-.healthTable col.col-category { width: 10%; }
-.healthTable col.col-status   { width: 8%; }
-.healthTable col.col-count    { width: 9%; }
+.healthTable col.col-title    { width: 24%; }
+.healthTable col.col-category { width: 9%; }
+.healthTable col.col-status   { width: 7%; }
+.healthTable col.col-count    { width: 8%; }
 .healthTable col.col-vol      { width: 7%; }
-.healthTable col.col-age      { width: 9%; }
-.healthTable col.col-fetched  { width: 14%; }
-.healthTable col.col-actions  { width: 15%; }
+.healthTable col.col-age      { width: 8%; }
+.healthTable col.col-cap      { width: 7%; }
+.healthTable col.col-fetched  { width: 13%; }
+.healthTable col.col-actions  { width: 17%; }
 .healthTable th.healthSortable:hover { color: var(--text-main); background: var(--bg-hover); }
 .healthTable tbody tr:hover { background: var(--bg-hover); }
 .errorText { color: #ef4444; font-size: 0.8rem; margin-top: 4px; font-family: monospace; }
