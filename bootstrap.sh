@@ -832,8 +832,10 @@ def refresh_one_feed(feed) -> int:
             "ThingsNobodyCaresAbout",
             "SAXParseException",
             "ParseError",
+            "ExpatError",
         }
-        if exc_name not in NON_FATAL:
+        # If entries came through despite the parse error, treat as non-fatal
+        if exc_name not in NON_FATAL and not parsed.entries:
             error = str(exc)[:500]
 
     new_etag          = getattr(parsed, "etag",     None) or feed["etag"]
@@ -1713,6 +1715,7 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
       sel.innerHTML = `<option value="">All feeds</option>`;
       state.feeds
         .filter(f => !state.category || f.category === state.category)
+        .sort((a, b) => a.title.localeCompare(b.title))
         .forEach(f => {
           const o = document.createElement("option");
           o.value = f.id;
