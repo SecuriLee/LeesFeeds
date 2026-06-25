@@ -1054,7 +1054,7 @@ def health(profile_id: int = 1):
     with db() as conn:
         rows = conn.execute("""
             SELECT f.id, f.title, f.category, f.xml_url, f.html_url, f.last_checked, f.last_error,
-                   f.max_volume, f.max_age_days,
+                   f.max_volume, f.max_age_days, f.max_items,
                    COUNT(i.id) AS item_count, SUM(CASE WHEN i.is_read = 0 THEN 1 ELSE 0 END) AS unread_count,
                    MAX(i.fetched_at) AS last_item_fetched_at
             FROM feeds f
