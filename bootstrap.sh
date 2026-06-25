@@ -2076,7 +2076,7 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
 
       const panel = el("healthPanel");
       panel.innerHTML = `
-        <h2 style="margin-bottom:16px; color:var(--text-main);">Feed Synchronization Diagnostics</h2>
+        <h2 style="margin-bottom:16px; color:var(--text-main);">Feed Synchronization Diagnostics <small style="font-size:0.6em; color:var(--text-muted); font-weight:normal;">v0.26</small></h2>
         <table class="healthTable">
           <colgroup>
             <col class="col-title"/><col class="col-category"/><col class="col-status"/>
