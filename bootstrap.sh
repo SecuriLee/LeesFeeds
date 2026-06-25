@@ -474,6 +474,16 @@ sqlite3 "${DB}" "
     AND fetched_at < datetime('now', '-${DEFAULT_DAYS} days')
     AND feed_id IN (SELECT id FROM feeds WHERE max_age_days IS NULL OR max_age_days = 0);
 "
+# Hard cap: trim oldest items beyond max_items regardless of read/starred state
+sqlite3 "${DB}" "
+  SELECT id, max_items FROM feeds WHERE max_items IS NOT NULL AND max_items > 0;
+" | while IFS='|' read -r feed_id cap; do
+  sqlite3 "${DB}" "
+    DELETE FROM items WHERE feed_id = ${feed_id} AND id NOT IN (
+      SELECT id FROM items WHERE feed_id = ${feed_id} ORDER BY fetched_at DESC LIMIT ${cap}
+    );
+  "
+done
 sqlite3 "${DB}" "VACUUM;"
 echo "$(date -u +%FT%TZ) pruned items older than per-feed max_age_days (default ${DEFAULT_DAYS}d). DB: $(du -sh "${DB}" | cut -f1)"
 PRUNEEOF
@@ -627,6 +637,7 @@ def init_db():
                 last_modified TEXT,
                 max_volume    INTEGER,
                 max_age_days  INTEGER,
+                max_items     INTEGER,
                 FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE,
                 UNIQUE(profile_id, xml_url)
             );
@@ -660,6 +671,7 @@ def init_db():
             ("last_modified", "TEXT"),
             ("max_volume",    "INTEGER"),
             ("max_age_days",  "INTEGER"),
+            ("max_items",     "INTEGER"),
         ]:
             try:
                 conn.execute(f"ALTER TABLE feeds ADD COLUMN {col} {defn}")
@@ -868,6 +880,12 @@ def refresh_one_feed(feed) -> int:
                 pass
 
         _dedup_feed(conn, feed["id"])
+        if feed["max_items"]:
+            conn.execute("""
+                DELETE FROM items WHERE feed_id = ? AND id NOT IN (
+                    SELECT id FROM items WHERE feed_id = ? ORDER BY fetched_at DESC LIMIT ?
+                )
+            """, (feed["id"], feed["id"], feed["max_items"]))
         conn.execute(
             "UPDATE feeds SET last_checked = ?, last_error = ?, etag = ?, last_modified = ? WHERE id = ?",
             (now, error, new_etag, new_last_modified, feed["id"])
@@ -929,6 +947,7 @@ class FeedEdit(BaseModel):
     html_url: Optional[str] = ""
     max_volume: Optional[int] = None
     max_age_days: Optional[int] = None
+    max_items: Optional[int] = None
 
 class EntryEdit(BaseModel):
     title: str
@@ -944,6 +963,7 @@ class FeedCreate(BaseModel):
     html_url: Optional[str] = ""
     max_volume: Optional[int] = None
     max_age_days: Optional[int] = None
+    max_items: Optional[int] = None
 
 @app.get("/")
 def index():
@@ -1003,9 +1023,9 @@ def add_feed(f: FeedCreate, profile_id: int = 1):
     try:
         with write_db() as conn:
             cur = conn.execute("""
-                INSERT INTO feeds (profile_id, title, category, xml_url, html_url, max_volume, max_age_days)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (profile_id, f.title, f.category, f.xml_url, f.html_url, f.max_volume, f.max_age_days))
+                INSERT INTO feeds (profile_id, title, category, xml_url, html_url, max_volume, max_age_days, max_items)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (profile_id, f.title, f.category, f.xml_url, f.html_url, f.max_volume, f.max_age_days, f.max_items))
             return {"id": cur.lastrowid}
     except sqlite3.IntegrityError:
         raise HTTPException(400, "Feed tracking conflict.")
@@ -1017,9 +1037,9 @@ def edit_feed(feed_id: int, f: FeedEdit):
     with write_db() as conn:
         cur = conn.execute("""
             UPDATE feeds SET title = ?, category = ?, xml_url = ?, html_url = ?,
-                             max_volume = ?, max_age_days = ?
+                             max_volume = ?, max_age_days = ?, max_items = ?
             WHERE id = ?
-        """, (f.title, f.category, f.xml_url, f.html_url, f.max_volume, f.max_age_days, feed_id))
+        """, (f.title, f.category, f.xml_url, f.html_url, f.max_volume, f.max_age_days, f.max_items, feed_id))
         if cur.rowcount == 0: raise HTTPException(404, "Feed stream not found.")
     return {"status": "updated"}
 
@@ -1097,6 +1117,19 @@ def prune(profile_id: int = 1):
               )
         """, (profile_id,))
         deleted += cur.rowcount
+
+        # Hard cap: trim oldest items beyond max_items regardless of read/starred state
+        capped_feeds = conn.execute("""
+            SELECT id, max_items FROM feeds
+            WHERE profile_id = ? AND max_items IS NOT NULL AND max_items > 0
+        """, (profile_id,)).fetchall()
+        for f in capped_feeds:
+            cur = conn.execute("""
+                DELETE FROM items WHERE feed_id = ? AND id NOT IN (
+                    SELECT id FROM items WHERE feed_id = ? ORDER BY fetched_at DESC LIMIT ?
+                )
+            """, (f["id"], f["id"], f["max_items"]))
+            deleted += cur.rowcount
 
         # URL deduplication — same logic as _dedup_feed() run on each refresh,
         # but run here across all feeds to catch duplicates that pre-date the fix.
@@ -2047,7 +2080,7 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
         <table class="healthTable">
           <colgroup>
             <col class="col-title"/><col class="col-category"/><col class="col-status"/>
-            <col class="col-count"/><col class="col-vol"/><col class="col-age"/>
+            <col class="col-count"/><col class="col-vol"/><col class="col-age"/><col class="col-cap"/>
             <col class="col-fetched"/><col class="col-actions"/>
           </colgroup>
           <thead>
@@ -2058,6 +2091,7 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
               <th>Unread / Total</th>
               <th>Max Vol</th>
               <th>Max Age (days)</th>
+              <th>Max Items</th>
               ${th("fetched",  "Latest Fetch")}
               <th>Actions</th>
             </tr>
@@ -2075,6 +2109,7 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
                 <td>${f.unread_count} / ${f.item_count}</td>
                 <td>${f.max_volume ?? '—'}</td>
                 <td>${f.max_age_days ?? '—'}</td>
+                <td>${f.max_items ?? '—'}</td>
                 <td>${fmtDate(f.last_item_fetched_at) || 'Never'}</td>
                 <td style="white-space:nowrap;">
                   <button class="smallRefreshFeedBtn" data-id="${f.id}" title="Refresh this feed now">↻</button>
@@ -2163,7 +2198,7 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
           <label style="display:block; margin-bottom:4px; color:var(--text-main);">Homepage Web Address</label>
           <input type="url" id="editFeedHtmlUrl" value="${esc(f.html_url)}" />
         </div>
-        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+        <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px;">
           <div class="form-field">
             <label style="display:block; margin-bottom:4px; color:var(--text-main);">Max volume <small style="color:var(--text-muted);">(items per fetch)</small></label>
             <input type="number" id="editFeedMaxVolume" value="${f.max_volume ?? ''}" placeholder="Default (${100})" min="1" max="500" />
@@ -2171,6 +2206,10 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
           <div class="form-field">
             <label style="display:block; margin-bottom:4px; color:var(--text-main);">Max age <small style="color:var(--text-muted);">(days before pruning)</small></label>
             <input type="number" id="editFeedMaxAge" value="${f.max_age_days ?? ''}" placeholder="Default (90)" min="1" max="3650" />
+          </div>
+          <div class="form-field">
+            <label style="display:block; margin-bottom:4px; color:var(--text-main);">Max items <small style="color:var(--text-muted);">(hard cap, any state)</small></label>
+            <input type="number" id="editFeedMaxItems" value="${f.max_items ?? ''}" placeholder="No cap" min="1" max="10000" />
           </div>
         </div>
       `;
@@ -2180,15 +2219,17 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
       saveBtn.parentNode.replaceChild(clone, saveBtn);
 
       clone.addEventListener("click", async () => {
-        const maxVol = el("editFeedMaxVolume").value;
-        const maxAge = el("editFeedMaxAge").value;
+        const maxVol   = el("editFeedMaxVolume").value;
+        const maxAge   = el("editFeedMaxAge").value;
+        const maxItems = el("editFeedMaxItems").value;
         const payload = {
           title:        el("editFeedTitle").value.trim(),
           category:     el("editFeedCategory").value.trim(),
           xml_url:      el("editFeedXmlUrl").value.trim(),
           html_url:     el("editFeedHtmlUrl").value.trim(),
-          max_volume:   maxVol ? parseInt(maxVol) : null,
-          max_age_days: maxAge ? parseInt(maxAge) : null,
+          max_volume:   maxVol   ? parseInt(maxVol)   : null,
+          max_age_days: maxAge   ? parseInt(maxAge)   : null,
+          max_items:    maxItems ? parseInt(maxItems) : null,
         };
         if (!payload.title || !payload.category || !payload.xml_url) return alert("Fill required fields.");
         try {
@@ -2245,9 +2286,10 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
               <datalist id="addCategoryList">${state.meta ? state.meta.categories.map(c => `<option value="${esc(c.category)}">`).join('') : ''}</datalist>
               <input type="url" id="addFeedXmlUrl" placeholder="Direct link RSS/Atom XML endpoint" style="background:var(--bg-app); color:var(--text-main); border:1px solid var(--border-color); padding:8px; border-radius:6px;" />
               <input type="url" id="addFeedHtmlUrl" placeholder="Optional standard website homepage URL" style="background:var(--bg-app); color:var(--text-main); border:1px solid var(--border-color); padding:8px; border-radius:6px;" />
-              <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+              <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px;">
                 <input type="number" id="addFeedMaxVolume" placeholder="Max volume (default 100)" min="1" max="500" style="background:var(--bg-app); color:var(--text-main); border:1px solid var(--border-color); padding:8px; border-radius:6px;" />
                 <input type="number" id="addFeedMaxAge" placeholder="Max age days (default 90)" min="1" max="3650" style="background:var(--bg-app); color:var(--text-main); border:1px solid var(--border-color); padding:8px; border-radius:6px;" />
+                <input type="number" id="addFeedMaxItems" placeholder="Max items (no cap)" min="1" max="10000" style="background:var(--bg-app); color:var(--text-main); border:1px solid var(--border-color); padding:8px; border-radius:6px;" />
               </div>
             </div>
             <button id="submitNewFeedBtn" style="width:100%; padding:10px;">Register Stream Instance</button>
@@ -2307,15 +2349,17 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
       });
 
       el("submitNewFeedBtn").addEventListener("click", async () => {
-        const maxVol = el("addFeedMaxVolume").value;
-        const maxAge = el("addFeedMaxAge").value;
+        const maxVol   = el("addFeedMaxVolume").value;
+        const maxAge   = el("addFeedMaxAge").value;
+        const maxItems = el("addFeedMaxItems").value;
         const payload = {
           title:        el("addFeedTitle").value.trim(),
           category:     el("addFeedCategory").value.trim(),
           xml_url:      el("addFeedXmlUrl").value.trim(),
           html_url:     el("addFeedHtmlUrl").value.trim(),
-          max_volume:   maxVol ? parseInt(maxVol) : null,
-          max_age_days: maxAge ? parseInt(maxAge) : null,
+          max_volume:   maxVol   ? parseInt(maxVol)   : null,
+          max_age_days: maxAge   ? parseInt(maxAge)   : null,
+          max_items:    maxItems ? parseInt(maxItems) : null,
         };
         if (!payload.title || !payload.category || !payload.xml_url) return alert("Fill core subscription parameters.");
         try {
@@ -2327,6 +2371,7 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
           el("addFeedHtmlUrl").value = "";
           el("addFeedMaxVolume").value = "";
           el("addFeedMaxAge").value = "";
+          el("addFeedMaxItems").value = "";
           await loadMeta();
           await loadFeeds();
         } catch(e) { alert(e); }
