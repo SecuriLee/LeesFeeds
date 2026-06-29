@@ -527,9 +527,36 @@ MAX_ITEMS_PER_FEED   = int(os.getenv("MAX_ITEMS_PER_FEED",   "100"))
 REFRESH_WORKERS      = int(os.getenv("REFRESH_WORKERS",      "8"))
 MAX_IMPORT_SIZE      = 5 * 1024 * 1024
 MAX_IMPORT_FEEDS     = 500
+FAVICON_PATH         = Path(os.getenv("DATABASE_PATH", "/data/opml_reader.sqlite3")).parent / "favicon.bin"
 
 BASE_DIR   = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
+
+SETTING_DEFAULTS = {
+    "refresh_minutes":      "30",
+    "default_max_volume":   "100",
+    "default_max_age_days": "90",
+    "default_max_items":    "",
+    "auto_prune":           "false",
+}
+
+def get_setting(key: str) -> Optional[str]:
+    try:
+        with db() as conn:
+            row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+            return row["value"] if row else SETTING_DEFAULTS.get(key, "")
+    except Exception:
+        return SETTING_DEFAULTS.get(key, "")
+
+def get_all_settings() -> dict:
+    result = dict(SETTING_DEFAULTS)
+    try:
+        with db() as conn:
+            for row in conn.execute("SELECT key, value FROM settings").fetchall():
+                result[row["key"]] = row["value"]
+    except Exception:
+        pass
+    return result
 
 _refresh_lock = threading.Lock()
 
@@ -665,6 +692,10 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_items_fetched   ON items(fetched_at);
             CREATE INDEX IF NOT EXISTS idx_feeds_category  ON feeds(category);
             CREATE INDEX IF NOT EXISTS idx_feeds_profile   ON feeds(profile_id);
+            CREATE TABLE IF NOT EXISTS settings (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL DEFAULT ''
+            );
         """)
         for col, defn in [
             ("etag",          "TEXT"),
@@ -853,7 +884,11 @@ def refresh_one_feed(feed) -> int:
     new_etag          = getattr(parsed, "etag",     None) or feed["etag"]
     new_last_modified = getattr(parsed, "modified", None) or feed["last_modified"]
 
-    volume = feed["max_volume"] or MAX_ITEMS_PER_FEED
+    try:
+        default_vol = int(get_setting("default_max_volume") or MAX_ITEMS_PER_FEED)
+    except (ValueError, TypeError):
+        default_vol = MAX_ITEMS_PER_FEED
+    volume = feed["max_volume"] or default_vol
 
     with write_db() as conn:
         for entry in parsed.entries[:volume]:
@@ -880,12 +915,18 @@ def refresh_one_feed(feed) -> int:
                 pass
 
         _dedup_feed(conn, feed["id"])
-        if feed["max_items"]:
+        try:
+            cap_setting = get_setting("default_max_items")
+            default_cap = int(cap_setting) if cap_setting else None
+        except (ValueError, TypeError):
+            default_cap = None
+        effective_cap = feed["max_items"] or default_cap
+        if effective_cap:
             conn.execute("""
                 DELETE FROM items WHERE feed_id = ? AND id NOT IN (
                     SELECT id FROM items WHERE feed_id = ? ORDER BY fetched_at DESC LIMIT ?
                 )
-            """, (feed["id"], feed["id"], feed["max_items"]))
+            """, (feed["id"], feed["id"], effective_cap))
         conn.execute(
             "UPDATE feeds SET last_checked = ?, last_error = ?, etag = ?, last_modified = ? WHERE id = ?",
             (now, error, new_etag, new_last_modified, feed["id"])
@@ -914,8 +955,17 @@ def refresh_all_feeds():
 
 def refresh_loop():
     while True:
-        time.sleep(max(FEED_REFRESH_MINUTES, 5) * 60)
+        try:
+            minutes = int(get_setting("refresh_minutes") or FEED_REFRESH_MINUTES)
+        except (ValueError, TypeError):
+            minutes = FEED_REFRESH_MINUTES
+        time.sleep(max(minutes, 5) * 60)
         refresh_all_feeds()
+        if get_setting("auto_prune") == "true":
+            try:
+                prune_all()
+            except Exception as e:
+                logger.error(f"Auto-prune error: {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -1089,13 +1139,22 @@ def _normalise_link(link: str) -> str:
     except Exception:
         return link
 
-@app.post("/api/prune")
-def prune(profile_id: int = 1):
-    now = utc_now()
+def prune_all(profile_id: int = 1):
+    """Core prune logic — called by /api/prune and auto-prune in refresh_loop."""
+    try:
+        default_age = int(get_setting("default_max_age_days") or 90)
+    except (ValueError, TypeError):
+        default_age = 90
+    try:
+        cap_setting = get_setting("default_max_items")
+        default_cap = int(cap_setting) if cap_setting else None
+    except (ValueError, TypeError):
+        default_cap = None
+
     deleted = 0
     dupes = 0
     with write_db() as conn:
-        # Age-based pruning
+        # Age-based pruning — per-feed override
         feeds_with_age = conn.execute("""
             SELECT id, max_age_days FROM feeds
             WHERE profile_id = ? AND max_age_days IS NOT NULL AND max_age_days > 0
@@ -1107,10 +1166,11 @@ def prune(profile_id: int = 1):
                   AND fetched_at < datetime('now', ? || ' days')
             """, (f["id"], f"-{f['max_age_days']}"))
             deleted += cur.rowcount
-        cur = conn.execute("""
+        # Age-based pruning — global default for feeds with no per-feed setting
+        cur = conn.execute(f"""
             DELETE FROM items
             WHERE is_read = 1 AND is_starred = 0
-              AND fetched_at < datetime('now', '-90 days')
+              AND fetched_at < datetime('now', '-{default_age} days')
               AND feed_id IN (
                 SELECT id FROM feeds
                 WHERE profile_id = ? AND (max_age_days IS NULL OR max_age_days = 0)
@@ -1118,7 +1178,7 @@ def prune(profile_id: int = 1):
         """, (profile_id,))
         deleted += cur.rowcount
 
-        # Hard cap: trim oldest items beyond max_items regardless of read/starred state
+        # Hard cap — per-feed override
         capped_feeds = conn.execute("""
             SELECT id, max_items FROM feeds
             WHERE profile_id = ? AND max_items IS NOT NULL AND max_items > 0
@@ -1130,9 +1190,21 @@ def prune(profile_id: int = 1):
                 )
             """, (f["id"], f["id"], f["max_items"]))
             deleted += cur.rowcount
+        # Hard cap — global default for feeds with no per-feed cap
+        if default_cap:
+            uncapped_feeds = conn.execute("""
+                SELECT id FROM feeds
+                WHERE profile_id = ? AND (max_items IS NULL OR max_items = 0)
+            """, (profile_id,)).fetchall()
+            for f in uncapped_feeds:
+                cur = conn.execute("""
+                    DELETE FROM items WHERE feed_id = ? AND id NOT IN (
+                        SELECT id FROM items WHERE feed_id = ? ORDER BY fetched_at DESC LIMIT ?
+                    )
+                """, (f["id"], f["id"], default_cap))
+                deleted += cur.rowcount
 
-        # URL deduplication — same logic as _dedup_feed() run on each refresh,
-        # but run here across all feeds to catch duplicates that pre-date the fix.
+        # URL deduplication
         all_feeds = conn.execute(
             "SELECT id FROM feeds WHERE profile_id = ?", (profile_id,)
         ).fetchall()
@@ -1140,7 +1212,52 @@ def prune(profile_id: int = 1):
             dupes += _dedup_feed(conn, feed["id"])
 
         conn.execute("VACUUM")
+    return deleted, dupes
+
+@app.post("/api/prune")
+def prune(profile_id: int = 1):
+    now = utc_now()
+    deleted, dupes = prune_all(profile_id)
     return {"status": "ok", "deleted": deleted, "dupes_removed": dupes, "pruned_at": now}
+
+@app.get("/api/settings")
+def get_settings_api():
+    return get_all_settings()
+
+class SettingsUpdate(BaseModel):
+    settings: dict
+
+@app.put("/api/settings")
+def update_settings_api(body: SettingsUpdate):
+    with write_db() as conn:
+        for key, value in body.settings.items():
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, str(value))
+            )
+    return get_all_settings()
+
+@app.post("/api/favicon")
+async def upload_favicon(file: UploadFile = File(...)):
+    allowed = {"image/png", "image/jpeg", "image/gif", "image/webp", "image/x-icon", "image/vnd.microsoft.icon"}
+    if file.content_type not in allowed:
+        raise HTTPException(400, "Unsupported image type.")
+    data = await file.read(512 * 1024)
+    FAVICON_PATH.write_bytes(data)
+    return {"status": "ok"}
+
+@app.delete("/api/favicon")
+def delete_favicon():
+    if FAVICON_PATH.exists():
+        FAVICON_PATH.unlink()
+    return {"status": "ok"}
+
+@app.get("/favicon.ico")
+def favicon():
+    if FAVICON_PATH.exists():
+        data = FAVICON_PATH.read_bytes()
+        return Response(content=data, media_type="image/png")
+    raise HTTPException(404, "No custom favicon")
 
 @app.get("/api/items")
 def items(
@@ -1385,6 +1502,16 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
     (function(){
       const t = localStorage.getItem("lf-theme");
       if (t === "light") document.documentElement.setAttribute("data-theme", "light");
+      const d = localStorage.getItem("lf-density");
+      if (d === "compact") document.documentElement.setAttribute("data-density", "compact");
+      // Apply saved appearance vars
+      const vars = ["--primary","--primary-hover","--bg-app","--bg-card","--radius","--card-img-h","--font-size-base"];
+      const isLight = t === "light";
+      vars.forEach(v => {
+        const key = "lf-var-" + (isLight ? "light-" : "dark-") + v;
+        const val = localStorage.getItem(key);
+        if (val) document.documentElement.style.setProperty(v, val);
+      });
     })();
   </script>
 </head>
@@ -1420,6 +1547,12 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
           <line x1="1" y1="14" x2="7" y2="14"/>
           <line x1="9" y1="8" x2="15" y2="8"/>
           <line x1="17" y1="16" x2="23" y2="16"/>
+        </svg>
+      </button>
+      <button id="settingsBtn" class="heroIconBtn secondary" aria-label="Settings" title="Settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
         </svg>
       </button>
       <button id="markReadBtn" class="heroIconBtn secondary" aria-label="Mark shown read" title="Mark shown read">
@@ -1473,6 +1606,12 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
         <polyline points="23 4 23 10 17 10"/>
         <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+      </svg>
+    </button>
+    <button id="settingsBtnMobile" class="mobileBarBtn" aria-label="Settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
       </svg>
     </button>
     <button id="filterToggleBtnMobile" class="mobileBarBtn" aria-label="Filters" aria-expanded="false">
@@ -2470,6 +2609,13 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
         const next = document.documentElement.getAttribute("data-theme") === "light" ? "dark" : "light";
         localStorage.setItem("lf-theme", next);
         apply(next);
+        // Re-apply appearance vars for the new theme
+        const cssVars = ["--primary","--primary-hover","--bg-app","--bg-card","--radius","--card-img-h","--font-size-base"];
+        cssVars.forEach(v => {
+          document.documentElement.style.removeProperty(v);
+          const saved = localStorage.getItem("lf-var-" + next + "-" + v);
+          if (saved) document.documentElement.style.setProperty(v, saved);
+        });
       };
       el("themeToggleBtn").addEventListener("click", toggle);
       el("themeToggleBtnMobile").addEventListener("click", toggle);
@@ -2714,6 +2860,312 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
 
     el("modalCancelBtn").addEventListener("click", closeModal);
 
+    el("settingsBtn").addEventListener("click", showSettings);
+    el("settingsBtnMobile").addEventListener("click", showSettings);
+
+    // =====================================================================
+    // SETTINGS
+    // =====================================================================
+
+    const THEME_PRESETS = {
+      teal:   { dark:  { "--primary":"#1A5C63","--primary-hover":"#14474d","--bg-app":"#0f172a","--bg-card":"#1e293b" },
+                light: { "--primary":"#1A5C63","--primary-hover":"#14474d","--bg-app":"#f1f5f9","--bg-card":"#ffffff" } },
+      amber:  { dark:  { "--primary":"#d97706","--primary-hover":"#b45309","--bg-app":"#1c1407","--bg-card":"#292008" },
+                light: { "--primary":"#92400e","--primary-hover":"#78350f","--bg-app":"#fffbeb","--bg-card":"#ffffff" } },
+      slate:  { dark:  { "--primary":"#64748b","--primary-hover":"#475569","--bg-app":"#0f172a","--bg-card":"#1e293b" },
+                light: { "--primary":"#475569","--primary-hover":"#334155","--bg-app":"#f8fafc","--bg-card":"#ffffff" } },
+      purple: { dark:  { "--primary":"#7c3aed","--primary-hover":"#6d28d9","--bg-app":"#0d0a1a","--bg-card":"#1a1330" },
+                light: { "--primary":"#6d28d9","--primary-hover":"#5b21b6","--bg-app":"#faf5ff","--bg-card":"#ffffff" } },
+      red:    { dark:  { "--primary":"#dc2626","--primary-hover":"#b91c1c","--bg-app":"#1a0808","--bg-card":"#2d0f0f" },
+                light: { "--primary":"#b91c1c","--primary-hover":"#991b1b","--bg-app":"#fff5f5","--bg-card":"#ffffff" } },
+    };
+
+    function currentTheme() {
+      return document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
+    }
+
+    function applyAppearanceVar(cssVar, value) {
+      document.documentElement.style.setProperty(cssVar, value);
+      localStorage.setItem("lf-var-" + currentTheme() + "-" + cssVar, value);
+    }
+
+    function applyPreset(name) {
+      const theme = currentTheme();
+      const vars = THEME_PRESETS[name]?.[theme];
+      if (!vars) return;
+      Object.entries(vars).forEach(([k, v]) => applyAppearanceVar(k, v));
+      localStorage.setItem("lf-preset-" + theme, name);
+    }
+
+    function clearCustomVars() {
+      ["--primary","--primary-hover","--bg-app","--bg-card","--radius","--card-img-h","--font-size-base"].forEach(v => {
+        document.documentElement.style.removeProperty(v);
+        localStorage.removeItem("lf-var-dark-" + v);
+        localStorage.removeItem("lf-var-light-" + v);
+      });
+      localStorage.removeItem("lf-preset-dark");
+      localStorage.removeItem("lf-preset-light");
+    }
+
+    async function showSettings() {
+      state.mode = "settings";
+      el("grid").classList.add("hidden");
+      document.querySelector(".controls").classList.add("hidden");
+      el("filterDrawer").setAttribute("hidden", "");
+      el("filterToggleBtn").classList.add("hidden");
+      closeDrawer();
+      const panel = el("healthPanel");
+      panel.classList.remove("hidden");
+      panel.innerHTML = "Loading settings…";
+
+      const srvSettings = await api("/api/settings").catch(() => ({}));
+      const theme = currentTheme();
+      const preset = localStorage.getItem("lf-preset-" + theme) || "teal";
+      const itemsPerPage = localStorage.getItem("lf-items-per-page") || "30";
+      const showFetchTs  = localStorage.getItem("lf-show-fetch-ts") !== "false";
+      const showAuthor   = localStorage.getItem("lf-show-author")   !== "false";
+
+      const inp = (id, label, val, type="number", placeholder="") =>
+        `<div class="form-field">
+          <label style="display:block;margin-bottom:4px;color:var(--text-muted);font-size:0.82rem;">${label}</label>
+          <input type="${type}" id="${id}" value="${esc(val)}" placeholder="${esc(placeholder)}"
+            style="width:100%;background:var(--bg-app);color:var(--text-main);border:1px solid var(--border-color);padding:8px;border-radius:6px;font-size:14px;" />
+        </div>`;
+
+      const clr = (id, label, cssVar) => {
+        const val = getComputedStyle(document.documentElement).getPropertyValue(cssVar).trim() ||
+                    (theme==="light" ? "#1A5C63" : "#1A5C63");
+        return `<div class="form-field">
+          <label style="display:block;margin-bottom:4px;color:var(--text-muted);font-size:0.82rem;">${label}</label>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <input type="color" id="${id}" value="${val}" data-css-var="${cssVar}"
+              style="width:48px;height:36px;padding:2px;border-radius:6px;border:1px solid var(--border-color);background:var(--bg-app);cursor:pointer;" />
+            <span id="${id}Hex" style="font-family:monospace;font-size:0.85rem;color:var(--text-muted);">${val}</span>
+          </div>
+        </div>`;
+      };
+
+      panel.innerHTML = `
+        <div style="max-width:680px;margin:0 auto;display:flex;flex-direction:column;gap:24px;">
+          <h2 style="color:var(--text-main);">Settings <small style="font-size:0.55em;color:var(--text-muted);font-weight:normal;">v0.26</small></h2>
+
+          <!-- Feed Defaults -->
+          <section style="background:var(--bg-card);border:1px solid var(--border-color);border-radius:var(--radius);padding:20px;">
+            <h3 style="margin-bottom:16px;color:var(--text-main);font-size:1rem;">Feed Defaults</h3>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+              ${inp("sRefreshMins",  "Refresh interval (minutes)", srvSettings.refresh_minutes      || "30", "number", "30")}
+              ${inp("sDefVolume",    "Default max volume / fetch",  srvSettings.default_max_volume   || "100", "number", "100")}
+              ${inp("sDefMaxAge",    "Default max age (days)",      srvSettings.default_max_age_days || "90", "number", "90")}
+              ${inp("sDefMaxItems",  "Default max items (hard cap)",srvSettings.default_max_items    || "", "number", "no cap")}
+            </div>
+            <div style="margin-top:12px;display:flex;align-items:center;gap:10px;">
+              <label class="toggle" style="min-height:unset;">
+                <input type="checkbox" id="sAutoPrune" ${srvSettings.auto_prune==="true" ? "checked" : ""} />
+                <span style="font-size:0.9rem;">Auto-prune after each refresh</span>
+              </label>
+            </div>
+            <button id="saveFeedDefaultsBtn" style="margin-top:16px;padding:8px 18px;">Save Feed Defaults</button>
+          </section>
+
+          <!-- Reading Preferences -->
+          <section style="background:var(--bg-card);border:1px solid var(--border-color);border-radius:var(--radius);padding:20px;">
+            <h3 style="margin-bottom:16px;color:var(--text-main);font-size:1rem;">Reading Preferences</h3>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">
+              ${inp("sItemsPerPage", "Articles per page", itemsPerPage, "number", "30")}
+            </div>
+            <div style="display:flex;flex-direction:column;gap:8px;">
+              <label class="toggle" style="min-height:unset;">
+                <input type="checkbox" id="sShowFetchTs" ${showFetchTs ? "checked" : ""} />
+                <span style="font-size:0.9rem;">Show fetch timestamp on cards</span>
+              </label>
+              <label class="toggle" style="min-height:unset;">
+                <input type="checkbox" id="sShowAuthor" ${showAuthor ? "checked" : ""} />
+                <span style="font-size:0.9rem;">Show author on cards</span>
+              </label>
+            </div>
+            <button id="saveReadingPrefsBtn" style="margin-top:16px;padding:8px 18px;">Save Reading Prefs</button>
+          </section>
+
+          <!-- Appearance -->
+          <section style="background:var(--bg-card);border:1px solid var(--border-color);border-radius:var(--radius);padding:20px;">
+            <h3 style="margin-bottom:4px;color:var(--text-main);font-size:1rem;">Appearance</h3>
+            <p style="font-size:0.8rem;color:var(--text-muted);margin-bottom:16px;">Changes apply live and are saved per theme (dark/light).</p>
+
+            <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px;">
+              ${Object.keys(THEME_PRESETS).map(name =>
+                `<button class="presetBtn secondary" data-preset="${name}" style="padding:6px 14px;font-size:0.85rem;${preset===name?'border-color:var(--primary);color:var(--primary);':''}">${name.charAt(0).toUpperCase()+name.slice(1)}</button>`
+              ).join('')}
+              <button id="resetAppearanceBtn" class="secondary" style="padding:6px 14px;font-size:0.85rem;margin-left:auto;">Reset to default</button>
+            </div>
+
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+              ${clr("sAccent",   "Accent colour",        "--primary")}
+              ${clr("sBgApp",    "Page background",       "--bg-app")}
+              ${clr("sBgCard",   "Card background",       "--bg-card")}
+              <div class="form-field">
+                <label style="display:block;margin-bottom:4px;color:var(--text-muted);font-size:0.82rem;">Border radius (px)</label>
+                <input type="range" id="sRadius" min="0" max="24" value="${parseInt(getComputedStyle(document.documentElement).getPropertyValue('--radius'))||8}"
+                  style="width:100%;accent-color:var(--primary);" />
+                <span id="sRadiusVal" style="font-size:0.8rem;color:var(--text-muted);">${parseInt(getComputedStyle(document.documentElement).getPropertyValue('--radius'))||8}px</span>
+              </div>
+              <div class="form-field">
+                <label style="display:block;margin-bottom:4px;color:var(--text-muted);font-size:0.82rem;">Card image height (px)</label>
+                <input type="range" id="sCardImgH" min="80" max="280" step="8" value="${parseInt(getComputedStyle(document.documentElement).getPropertyValue('--card-img-h'))||160}"
+                  style="width:100%;accent-color:var(--primary);" />
+                <span id="sCardImgHVal" style="font-size:0.8rem;color:var(--text-muted);">${parseInt(getComputedStyle(document.documentElement).getPropertyValue('--card-img-h'))||160}px</span>
+              </div>
+            </div>
+          </section>
+
+          <!-- Favicon -->
+          <section style="background:var(--bg-card);border:1px solid var(--border-color);border-radius:var(--radius);padding:20px;">
+            <h3 style="margin-bottom:12px;color:var(--text-main);font-size:1rem;">Favicon</h3>
+            <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+              <img id="faviconPreview" src="/favicon.ico?t=${Date.now()}" width="32" height="32"
+                style="border-radius:4px;border:1px solid var(--border-color);"
+                onerror="this.style.display='none'" />
+              <input type="file" id="faviconFile" accept="image/*" style="flex:1;background:transparent;border:none;color:var(--text-muted);font-size:0.85rem;padding:4px;" />
+              <button id="uploadFaviconBtn" class="secondary" style="padding:8px 14px;">Upload</button>
+              <button id="deleteFaviconBtn" class="secondary danger" style="padding:8px 14px;">Remove</button>
+            </div>
+            <p style="font-size:0.78rem;color:var(--text-muted);margin-top:8px;">PNG, JPEG or ICO recommended. Falls back to built-in SVG if removed.</p>
+          </section>
+
+          <!-- Maintenance -->
+          <section style="background:var(--bg-card);border:1px solid var(--border-color);border-radius:var(--radius);padding:20px;">
+            <h3 style="margin-bottom:12px;color:var(--text-main);font-size:1rem;">Maintenance</h3>
+            <div style="display:flex;align-items:center;gap:12px;">
+              <div style="flex:1;font-size:0.85rem;color:var(--text-muted);">Run a full prune now: removes read/unstarred items beyond age limits and enforces hard caps.</div>
+              <button id="settingsPruneBtn" class="secondary" style="padding:8px 14px;white-space:nowrap;">Prune now</button>
+            </div>
+          </section>
+        </div>
+      `;
+
+      // Feed defaults save
+      el("saveFeedDefaultsBtn").addEventListener("click", async () => {
+        const btn = el("saveFeedDefaultsBtn");
+        btn.disabled = true;
+        try {
+          await api("/api/settings", { method: "PUT", body: JSON.stringify({ settings: {
+            refresh_minutes:      el("sRefreshMins").value  || "30",
+            default_max_volume:   el("sDefVolume").value    || "100",
+            default_max_age_days: el("sDefMaxAge").value    || "90",
+            default_max_items:    el("sDefMaxItems").value  || "",
+            auto_prune:           el("sAutoPrune").checked ? "true" : "false",
+          }})});
+          showToast("Feed defaults saved.");
+        } catch(e) { showToast("Save failed."); }
+        btn.disabled = false;
+      });
+
+      // Reading prefs save
+      el("saveReadingPrefsBtn").addEventListener("click", () => {
+        const ipp = parseInt(el("sItemsPerPage").value) || 30;
+        state.limit = Math.max(5, Math.min(500, ipp));
+        localStorage.setItem("lf-items-per-page", state.limit);
+        const showFetch = el("sShowFetchTs").checked;
+        const showAuth  = el("sShowAuthor").checked;
+        localStorage.setItem("lf-show-fetch-ts", showFetch);
+        localStorage.setItem("lf-show-author", showAuth);
+        document.documentElement.setAttribute("data-show-fetch-ts", showFetch ? "1" : "0");
+        document.documentElement.setAttribute("data-show-author", showAuth ? "1" : "0");
+        showToast("Reading preferences saved.");
+      });
+
+      // Colour pickers — live apply
+      ["sAccent","sBgApp","sBgCard"].forEach(id => {
+        const input = el(id);
+        const cssVar = input.dataset.cssVar;
+        const hexEl  = el(id + "Hex");
+        input.addEventListener("input", () => {
+          hexEl.textContent = input.value;
+          applyAppearanceVar(cssVar, input.value);
+          if (cssVar === "--primary") applyAppearanceVar("--primary-hover", input.value + "cc");
+        });
+      });
+
+      // Radius slider
+      el("sRadius").addEventListener("input", e => {
+        el("sRadiusVal").textContent = e.target.value + "px";
+        applyAppearanceVar("--radius", e.target.value + "px");
+      });
+
+      // Card image height slider
+      el("sCardImgH").addEventListener("input", e => {
+        el("sCardImgHVal").textContent = e.target.value + "px";
+        applyAppearanceVar("--card-img-h", e.target.value + "px");
+      });
+
+      // Preset buttons
+      panel.querySelectorAll(".presetBtn").forEach(btn => {
+        btn.addEventListener("click", () => {
+          applyPreset(btn.dataset.preset);
+          panel.querySelectorAll(".presetBtn").forEach(b => {
+            b.style.borderColor = b.dataset.preset === btn.dataset.preset ? "var(--primary)" : "";
+            b.style.color       = b.dataset.preset === btn.dataset.preset ? "var(--primary)" : "";
+          });
+          // Sync colour pickers to new values
+          ["sAccent","sBgApp","sBgCard"].forEach(id => {
+            const inp2 = el(id);
+            if (!inp2) return;
+            const v = getComputedStyle(document.documentElement).getPropertyValue(inp2.dataset.cssVar).trim();
+            inp2.value = v;
+            const hex = el(id + "Hex");
+            if (hex) hex.textContent = v;
+          });
+        });
+      });
+
+      // Reset appearance
+      el("resetAppearanceBtn").addEventListener("click", () => {
+        clearCustomVars();
+        showToast("Appearance reset to defaults.");
+        showSettings();
+      });
+
+      // Favicon upload
+      el("uploadFaviconBtn").addEventListener("click", async () => {
+        const f = el("faviconFile").files[0];
+        if (!f) return alert("Select an image first.");
+        const fd = new FormData();
+        fd.append("file", f);
+        try {
+          await fetch("/api/favicon", { method: "POST", body: fd });
+          el("faviconPreview").src = "/favicon.ico?t=" + Date.now();
+          el("faviconPreview").style.display = "";
+          showToast("Favicon updated. Reload the tab to see it in your browser.");
+        } catch(e) { showToast("Upload failed."); }
+      });
+
+      el("deleteFaviconBtn").addEventListener("click", async () => {
+        await api("/api/favicon", { method: "DELETE" });
+        el("faviconPreview").style.display = "none";
+        showToast("Favicon removed.");
+      });
+
+      // Maintenance prune
+      el("settingsPruneBtn").addEventListener("click", async () => {
+        const btn = el("settingsPruneBtn");
+        btn.disabled = true; btn.textContent = "Pruning…";
+        try {
+          const res = await api(`/api/prune?profile_id=${state.currentProfileId}`, { method: "POST" });
+          showToast(`Pruned ${res.deleted} item${res.deleted !== 1 ? 's' : ''}.`);
+        } catch(e) { showToast("Prune failed."); }
+        btn.disabled = false; btn.textContent = "Prune now";
+      });
+    }
+
+    // Apply persisted reading prefs on load
+    (function() {
+      const ipp = parseInt(localStorage.getItem("lf-items-per-page")) || 30;
+      state.limit = Math.max(5, Math.min(500, ipp));
+      const showFetch = localStorage.getItem("lf-show-fetch-ts") !== "false";
+      const showAuth  = localStorage.getItem("lf-show-author")   !== "false";
+      document.documentElement.setAttribute("data-show-fetch-ts", showFetch ? "1" : "0");
+      document.documentElement.setAttribute("data-show-author", showAuth ? "1" : "0");
+    })();
+
     window.addEventListener("scroll", () => {
       // Guard: scrollY > 0 prevents the programmatic window.scrollTo(0,0)
       // in loadItems() from firing this handler. On mobile the page can be
@@ -2754,6 +3206,8 @@ write_file "app/static/styles.css" "stylesheet" << 'CUSTOMCSS'
   --tag-color: #93c5fd;
   --placeholder-text: rgba(255,255,255,0.18);
   --radius: 8px;
+  --card-img-h: 160px;
+  --font-size-base: 16px;
   color-scheme: dark;
 }
 
@@ -3008,7 +3462,7 @@ button.secondary:hover { background: var(--bg-hover); }
    don't loom too large between the mobile and full desktop breakpoints. */
 @media (min-width: 640px) and (max-width: 1023px) {
   .cardImage img,
-  .cardImagePlaceholder { height: 112px; }
+  .cardImagePlaceholder { height: calc(var(--card-img-h, 160px) * 0.7); }
 }
 
 .card {
@@ -3031,7 +3485,7 @@ button.secondary:hover { background: var(--bg-hover); }
 
 .cardImage img {
   width: 100%;
-  height: 160px;
+  height: var(--card-img-h, 160px);
   object-fit: cover;
   display: block;
   flex-shrink: 0;
@@ -3039,7 +3493,7 @@ button.secondary:hover { background: var(--bg-hover); }
 
 .cardImagePlaceholder {
   width: 100%;
-  height: 160px;
+  height: var(--card-img-h, 160px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -3076,6 +3530,8 @@ button.secondary:hover { background: var(--bg-hover); }
 .categoryTag { background: var(--tag-bg); color: var(--tag-color); padding: 2px 6px; border-radius: 4px; font-weight: 600; }
 .feedTitleTag { color: var(--text-main); font-weight: 600; }
 .fetchedTag { color: var(--text-muted); font-size: 0.7rem; font-style: italic; }
+[data-show-fetch-ts="0"] .fetchedTag { display: none; }
+[data-show-author="0"] .authorTag    { display: none; }
 /* FEATURE 2: badge showing an article was also seen in other feeds (dedup) */
 .dupeTag { background: var(--bg-hover); color: var(--text-muted); padding: 2px 6px; border-radius: 4px; font-weight: 600; font-size: 0.7rem; }
 
