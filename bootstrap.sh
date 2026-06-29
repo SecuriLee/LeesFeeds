@@ -1504,6 +1504,8 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
       if (t === "light") document.documentElement.setAttribute("data-theme", "light");
       const d = localStorage.getItem("lf-density");
       if (d === "compact") document.documentElement.setAttribute("data-density", "compact");
+      if (localStorage.getItem("lf-sticky-header") === "true")
+        document.documentElement.setAttribute("data-sticky-header", "1");
       // Apply saved appearance vars
       const vars = ["--primary","--primary-hover","--bg-app","--bg-card","--radius","--card-img-h","--font-size-base"];
       const isLight = t === "light";
@@ -2998,7 +3000,7 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
               <button id="resetAppearanceBtn" class="secondary" style="padding:6px 14px;font-size:0.85rem;margin-left:auto;">Reset to default</button>
             </div>
 
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;">
               ${clr("sAccent",   "Accent colour",        "--primary")}
               ${clr("sBgApp",    "Page background",       "--bg-app")}
               ${clr("sBgCard",   "Card background",       "--bg-card")}
@@ -3014,6 +3016,12 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
                   style="width:100%;accent-color:var(--primary);" />
                 <span id="sCardImgHVal" style="font-size:0.8rem;color:var(--text-muted);">${parseInt(getComputedStyle(document.documentElement).getPropertyValue('--card-img-h'))||160}px</span>
               </div>
+            </div>
+            <div style="margin-top:12px;">
+              <label class="toggle" style="min-height:unset;">
+                <input type="checkbox" id="sStickyHeader" ${localStorage.getItem("lf-sticky-header")==="true" ? "checked" : ""} />
+                <span style="font-size:0.9rem;">Sticky header on desktop</span>
+              </label>
             </div>
           </section>
 
@@ -3095,6 +3103,13 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
       el("sCardImgH").addEventListener("input", e => {
         el("sCardImgHVal").textContent = e.target.value + "px";
         applyAppearanceVar("--card-img-h", e.target.value + "px");
+      });
+
+      // Sticky header toggle
+      el("sStickyHeader").addEventListener("change", e => {
+        const v = e.target.checked;
+        localStorage.setItem("lf-sticky-header", v ? "true" : "false");
+        document.documentElement.setAttribute("data-sticky-header", v ? "1" : "0");
       });
 
       // Preset buttons
@@ -3271,6 +3286,12 @@ body {
     align-items: center;
     padding: 20px 32px;
   }
+}
+
+[data-sticky-header="1"] .hero {
+  position: sticky;
+  top: 0;
+  z-index: 100;
 }
 
 .controls {
