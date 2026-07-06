@@ -2303,7 +2303,7 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
           const id = Number(b.dataset.id);
           b.disabled = true;
           b.textContent = "…";
-          await fetch(\`/api/items/mark-all-read?feed_id=\${id}\`, {method:"POST"});
+          await fetch("/api/items/mark-all-read?feed_id=" + id, {method:"POST"});
           b.textContent = "✓ Read";
           b.disabled = false;
           state.items.forEach(i => { if (i.feed_id === id) i.is_read = 1; });
