@@ -2254,7 +2254,7 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
                 <td>${fmtDate(f.last_item_fetched_at) || 'Never'}</td>
                 <td style="white-space:nowrap;">
                   <button class="smallRefreshFeedBtn" data-id="${f.id}" title="Refresh this feed now">↻</button>
-                  <button class="smallMarkReadFeedBtn" data-id="${f.id}" title="Mark all items in this feed as read">✓ Read</button>
+                  <button class="smallMarkReadFeedBtn" data-id="${f.id}" title="Mark all items in this feed as read">✓</button>
                   <button class="smallEditFeedBtn" data-id="${f.id}">Edit</button>
                   <button class="smallDeleteFeedBtn danger" data-id="${f.id}">Delete</button>
                 </td>
@@ -2304,7 +2304,7 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
           b.disabled = true;
           b.textContent = "…";
           const res = await fetch("/api/items/mark-all-read?feed_id=" + id, {method:"POST"});
-          b.textContent = "✓ Read";
+          b.textContent = "✓";
           b.disabled = false;
           // update unread count cell in-place
           const countCell = panel.querySelector("[data-count-id='" + id + "']");
