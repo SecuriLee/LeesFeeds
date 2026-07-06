@@ -2217,7 +2217,7 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
 
       const panel = el("healthPanel");
       panel.innerHTML = `
-        <h2 style="margin-bottom:16px; color:var(--text-main);">Feed Synchronization Diagnostics <small style="font-size:0.6em; color:var(--text-muted); font-weight:normal;">v0.26</small></h2>
+        <h2 style="margin-bottom:16px; color:var(--text-main);">Feed Synchronization Diagnostics <small style="font-size:0.6em; color:var(--text-muted); font-weight:normal;">v0.29</small></h2>
         <table class="healthTable">
           <colgroup>
             <col class="col-title"/><col class="col-category"/><col class="col-status"/>
@@ -2254,6 +2254,7 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
                 <td>${fmtDate(f.last_item_fetched_at) || 'Never'}</td>
                 <td style="white-space:nowrap;">
                   <button class="smallRefreshFeedBtn" data-id="${f.id}" title="Refresh this feed now">↻</button>
+                  <button class="smallMarkReadFeedBtn" data-id="${f.id}" title="Mark all items in this feed as read">✓ Read</button>
                   <button class="smallEditFeedBtn" data-id="${f.id}">Edit</button>
                   <button class="smallDeleteFeedBtn danger" data-id="${f.id}">Delete</button>
                 </td>
@@ -2296,6 +2297,18 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
       });
       panel.querySelectorAll(".smallDeleteFeedBtn").forEach(b => {
         b.addEventListener("click", () => deleteFeed(Number(b.dataset.id)));
+      });
+      panel.querySelectorAll(".smallMarkReadFeedBtn").forEach(b => {
+        b.addEventListener("click", async () => {
+          const id = Number(b.dataset.id);
+          b.disabled = true;
+          b.textContent = "…";
+          await fetch(\`/api/items/mark-all-read?feed_id=\${id}\`, {method:"POST"});
+          b.textContent = "✓ Read";
+          b.disabled = false;
+          state.items.forEach(i => { if (i.feed_id === id) i.is_read = 1; });
+          renderItems();
+        });
       });
     }
 
@@ -2949,7 +2962,7 @@ write_file "app/static/index.html" "frontend UI" << 'FRONTENDHTML'
 
       panel.innerHTML = `
         <div style="max-width:680px;margin:0 auto;display:flex;flex-direction:column;gap:24px;">
-          <h2 style="color:var(--text-main);">Settings <small style="font-size:0.55em;color:var(--text-muted);font-weight:normal;">v0.26</small></h2>
+          <h2 style="color:var(--text-main);">Settings <small style="font-size:0.55em;color:var(--text-muted);font-weight:normal;">v0.29</small></h2>
 
           <!-- Feed Defaults -->
           <section style="background:var(--bg-card);border:1px solid var(--border-color);border-radius:var(--radius);padding:20px;">
@@ -3433,7 +3446,7 @@ body {
 .controls select,
 .heroActions button,
 .modal-actions button,
-.smallEditFeedBtn, .smallDeleteFeedBtn,
+.smallEditFeedBtn, .smallMarkReadFeedBtn, .smallDeleteFeedBtn,
 button {
   min-height: 44px;
   padding: 10px 14px;
